@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import re
@@ -7,15 +8,18 @@ import socket
 import sqlite3
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 import requests
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.getenv("BOT_DB_PATH", BASE_DIR / "idris_bot.sqlite3"))
+DB_PATH = Path(
+    os.getenv("BOT_DB_PATH")
+    or (Path(os.getenv("DATA_DIR", str(BASE_DIR))) / "idris_bot.sqlite3")
+)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 APP_URL = os.getenv("APP_URL", "https://IdrisStudy.bothost.tech").rstrip("/")
 PORT = int(os.getenv("PORT", "5000"))
@@ -35,8 +39,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("idris-bot")
-
-app = FastAPI(title="IDRIS STUDY", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 # ---------------- storage ----------------
@@ -140,7 +142,6 @@ def contact_keyboard():
         "keyboard": [[{"text": "Поделиться номером", "request_contact": True}]],
         "resize_keyboard": True,
         "one_time_keyboard": True,
-        "input_field_placeholder": "Нажмите кнопку ниже",
     }
 
 
@@ -261,10 +262,7 @@ def handle_update(update):
             row = db.execute(
                 "SELECT account_id FROM telegram_links WHERE chat_id = ?", (chat_id,)
             ).fetchone()
-        send_message(
-            chat_id,
-            "Аккаунт подключён." if row else "Аккаунт пока не подключён.",
-        )
+        send_message(chat_id, "Аккаунт подключён." if row else "Аккаунт пока не подключён.")
         return
 
     if text == "/unlink":
@@ -298,8 +296,7 @@ def polling_loop():
                 except Exception:
                     log.exception("Error while handling update")
         except Exception as exc:
-            msg = str(exc)
-            if "Conflict" in msg:
+            if "Conflict" in str(exc):
                 try:
                     telegram("deleteWebhook", {"drop_pending_updates": False})
                 except Exception:
@@ -308,145 +305,178 @@ def polling_loop():
             time.sleep(4)
 
 
-# ---------------- web ----------------
+# ---------------- http api (stdlib only) ----------------
 
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "same-origin"
-    return response
-
-
-@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
-def index():
-    return FileResponse(BASE_DIR / "index.html")
-
-
-@app.get("/health")
-def health():
-    return {
-        "ok": True,
-        "bot": bool(BOT_TOKEN),
-        "mode": TELEGRAM_MODE,
-        "webhook": f"{APP_URL}/telegram/webhook",
-    }
-
-
-@app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
-    if WEBHOOK_SECRET:
-        provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if not secrets.compare_digest(provided, WEBHOOK_SECRET):
-            return JSONResponse({"ok": False}, status_code=403)
-    try:
-        handle_update(await request.json())
-    except Exception:
-        log.exception("Error while handling Telegram update")
-    return {"ok": True}
-
-
-@app.post("/api/telegram/link")
-async def create_link(request: Request):
-    data = await request.json()
+def api_create_link(data):
     account_id = str(data.get("account_id", "")).strip()[:80]
     display_name = str(data.get("display_name", "")).strip()[:120]
     phone = normalize_phone(data.get("phone"))
     if not account_id or len(phone) < 10:
-        return JSONResponse(
-            {"ok": False, "error": "Укажите аккаунт и корректный номер"},
-            status_code=400,
-        )
+        return 400, {"ok": False, "error": "Укажите аккаунт и корректный номер"}
 
     code = secrets.token_hex(3).upper()
     now = int(time.time())
     with connect_db() as db:
         db.execute("DELETE FROM pending_links WHERE account_id = ?", (account_id,))
         db.execute(
-            """
-            INSERT INTO pending_links
-                (code, account_id, display_name, phone, status, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
-            """,
+            "INSERT INTO pending_links (code, account_id, display_name, phone, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
             (code, account_id, display_name, phone, now),
         )
-
     username = current_bot_username()
     bot_url = f"https://t.me/{username}?start={code}" if username else ""
-    return {"ok": True, "code": code, "bot_url": bot_url, "expires_in": LINK_TTL}
+    return 200, {"ok": True, "code": code, "bot_url": bot_url, "expires_in": LINK_TTL}
 
 
-@app.get("/api/telegram/link-status")
-def link_status(code: str = ""):
+def api_link_status(code):
     code = code.strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{6}", code):
-        return JSONResponse({"ok": False, "linked": False}, status_code=400)
+        return 400, {"ok": False, "linked": False}
     with connect_db() as db:
         row = db.execute(
             "SELECT status, phone FROM pending_links WHERE code = ?", (code,)
         ).fetchone()
-    return {
+    return 200, {
         "ok": True,
         "linked": bool(row and row["status"] == "confirmed"),
         "phone": row["phone"] if row and row["status"] == "confirmed" else None,
     }
 
 
-@app.post("/api/telegram/unlink")
-async def api_unlink(request: Request):
-    data = await request.json()
+def api_unlink(data):
     account_id = str(data.get("account_id", "")).strip()[:80]
     if not account_id:
-        return JSONResponse({"ok": False}, status_code=400)
+        return 400, {"ok": False}
     with connect_db() as db:
         db.execute("DELETE FROM telegram_links WHERE account_id = ?", (account_id,))
         db.execute("DELETE FROM pending_links WHERE account_id = ?", (account_id,))
-    return {"ok": True}
+    return 200, {"ok": True}
 
 
-@app.post("/api/telegram/notify")
-async def notify(request: Request):
-    data = await request.json()
+def api_notify(data):
     account_id = str(data.get("account_id", "")).strip()[:80]
     if not account_id:
-        return JSONResponse({"ok": False, "error": "account_id is required"}, status_code=400)
+        return 400, {"ok": False, "error": "account_id is required"}
     with connect_db() as db:
         row = db.execute(
             "SELECT chat_id FROM telegram_links WHERE account_id = ?", (account_id,)
         ).fetchone()
     if not row:
-        return {"ok": True, "delivered": False}
+        return 200, {"ok": True, "delivered": False}
 
-    student = str(data.get("student", "Студент"))[:120]
-    group = str(data.get("group", "—"))[:50]
-    test = str(data.get("test", "Тест"))[:160]
-    score = str(data.get("score", "0"))[:12]
-    total = str(data.get("total", "0"))[:12]
-    grade = str(data.get("grade", "—"))[:4]
     text = (
         "Новое прохождение теста\n\n"
-        f"Тест: {test}\n"
-        f"Студент: {student}\n"
-        f"Группа: {group}\n"
-        f"Результат: {score} из {total}\n"
-        f"Оценка: {grade}"
+        f"Тест: {str(data.get('test', 'Тест'))[:160]}\n"
+        f"Студент: {str(data.get('student', 'Студент'))[:120]}\n"
+        f"Группа: {str(data.get('group', '—'))[:50]}\n"
+        f"Результат: {str(data.get('score', '0'))[:12]} из {str(data.get('total', '0'))[:12]}\n"
+        f"Оценка: {str(data.get('grade', '—'))[:4]}"
     )
     try:
         send_message(row["chat_id"], text)
     except Exception:
         log.exception("Unable to deliver notification")
-        return JSONResponse({"ok": False, "delivered": False}, status_code=502)
-    return {"ok": True, "delivered": True}
+        return 502, {"ok": False, "delivered": False}
+    return 200, {"ok": True, "delivered": True}
 
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
-    if BOT_TOKEN and TELEGRAM_MODE == "webhook":
+class Handler(BaseHTTPRequestHandler):
+    server_version = "IdrisStudy/1.0"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        log.info("%s %s", self.address_string(), fmt % args)
+
+    def _headers(self, status, ctype, length):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.end_headers()
+
+    def _send_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._headers(status, "application/json; charset=utf-8", len(body))
+        self.wfile.write(body)
+
+    def _read_json(self):
         try:
-            configure_webhook()
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if not length or length > 128 * 1024:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
         except Exception:
-            log.exception("Unable to configure Telegram webhook")
+            return {}
+
+    def _serve_index(self, head=False):
+        path = BASE_DIR / "index.html"
+        try:
+            body = path.read_bytes()
+        except Exception:
+            self._headers(404, "text/plain; charset=utf-8", 0)
+            return
+        self._headers(200, "text/html; charset=utf-8", len(body))
+        if not head:
+            self.wfile.write(body)
+
+    def _hidden_404(self):
+        self._send_json({"detail": "Not Found"}, 404)
+
+    def do_HEAD(self):
+        self._serve_index(head=True)
+
+    def do_GET(self):
+        try:
+            url = urlparse(self.path)
+            path = url.path
+            if path == "/" or path == "/index.html":
+                self._serve_index()
+            elif path == "/health":
+                self._send_json({
+                    "ok": True, "bot": bool(BOT_TOKEN), "mode": TELEGRAM_MODE,
+                    "webhook": f"{APP_URL}/telegram/webhook",
+                })
+            elif path == "/api/telegram/link-status":
+                code = parse_qs(url.query).get("code", [""])[0]
+                status, payload = api_link_status(code)
+                self._send_json(payload, status)
+            else:
+                self._hidden_404()
+        except Exception:
+            log.exception("GET error")
+
+    def do_POST(self):
+        try:
+            path = urlparse(self.path).path
+            if path == "/telegram/webhook":
+                if WEBHOOK_SECRET:
+                    provided = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+                    if not secrets.compare_digest(provided, WEBHOOK_SECRET):
+                        self._send_json({"ok": False}, 403)
+                        return
+                try:
+                    handle_update(self._read_json())
+                except Exception:
+                    log.exception("Webhook update error")
+                self._send_json({"ok": True})
+            elif path == "/api/telegram/link":
+                status, payload = api_create_link(self._read_json())
+                self._send_json(payload, status)
+            elif path == "/api/telegram/unlink":
+                status, payload = api_unlink(self._read_json())
+                self._send_json(payload, status)
+            elif path == "/api/telegram/notify":
+                status, payload = api_notify(self._read_json())
+                self._send_json(payload, status)
+            else:
+                self._hidden_404()
+        except Exception:
+            log.exception("POST error")
 
 
 # ---------------- entry ----------------
@@ -457,35 +487,40 @@ def port_busy(port):
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def run_web():
+    if port_busy(PORT):
+        log.warning(
+            "Порт %s уже занят веб-сервером хостинга — свой сервер не поднимаю,"
+            " бот продолжает работать", PORT
+        )
+        return None
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    log.info("IDRIS STUDY web запущен на 0.0.0.0:%s", PORT)
+    try:
+        t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5})
+    except TypeError:
+        t = threading.Thread(target=server.serve_forever)
+    t.daemon = True
+    t.start()
+    return server
+
+
 def main():
     init_db()
 
     if BOT_TOKEN and TELEGRAM_MODE == "polling":
         threading.Thread(target=polling_loop, daemon=True).start()
 
-    if not RUN_WEB:
-        log.info("WEB disabled — running bot only (mode=%s)", TELEGRAM_MODE)
-        while True:
-            time.sleep(3600)
+    server = None
+    if RUN_WEB:
+        server = run_web()
 
-    import uvicorn
+    if BOT_TOKEN and TELEGRAM_MODE == "webhook" and server:
+        threading.Thread(target=lambda: [time.sleep(1), configure_webhook()], daemon=True).start()
 
-    if port_busy(PORT):
-        log.warning(
-            "Порт %s уже занят веб-сервером хостинга — свой веб-сервер не поднимаю. "
-            "Бот продолжает работать (режим %s).",
-            PORT, TELEGRAM_MODE,
-        )
-        while True:
-            time.sleep(3600)
-
-    log.info("Starting IDRIS STUDY web on 0.0.0.0:%s", PORT)
-    try:
-        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
-    except OSError as exc:
-        log.warning("Не удалось занять порт %s: %s. Бот продолжает работать.", PORT, exc)
-        while True:
-            time.sleep(3600)
+    log.info("Бот запущен (режим=%s, web=%s)", TELEGRAM_MODE, "on" if server else "off")
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
-# Точка входа для автоопределения хостинга (приоритет main.py).
-# Реэкспортирует ASGI-приложение и функцию запуска из bot.py.
-from bot import app, main
+# Точка входа для хостинга (CMD: python main.py).
+from bot import main
 
 if __name__ == "__main__":
     main()
