@@ -2402,7 +2402,8 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       <div class="row"><span class="row-label">Аккаунтов<span class="row-sub" id="admAcc">0</span></span><i data-lucide="users" class="row-ico"></i></div>
       <div class="row"><span class="row-label">Тестов создано<span class="row-sub" id="admTests">0</span></span><i data-lucide="clipboard-list" class="row-ico"></i></div>
       <div class="row"><span class="row-label">Всего прохождений<span class="row-sub" id="admRuns">0</span></span><i data-lucide="activity" class="row-ico"></i></div>
-      <div class="row"><span class="row-label">Сбросить все данные<span class="row-sub">Очистить локальное хранилище</span></span><button class="mg-btn danger" id="admWipe"><i data-lucide="trash-2"></i></button></div>
+      <div class="row"><span class="row-label">Выдать ID сотрудника<span class="row-sub" id="admIdMsg">Для регистрации преподавателя</span></span><div class="sch-time"><input id="admId" value="IDR-"><button class="mg-btn" id="admIdAdd"><i data-lucide="plus"></i></button></div></div>
+      <div class="row"><span class="row-label">Сбросить все данные<span class="row-sub">Удалить тесты, попытки и обычные аккаунты с сервера</span></span><button class="mg-btn danger" id="admWipe"><i data-lucide="trash-2"></i></button></div>
     </div>
 
     <div class="pane" data-pane="peditor">
@@ -2655,9 +2656,8 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
         }, 320);
       }
       if (txt.includes('Выйти')) {                      // реальный выход
-        authed = false; currentUser = null;
-        DB.session = null; saveDB();
-        root.classList.remove('role-student');
+        api('/api/auth/logout', { method: 'POST', body: '{}' }).catch(() => {});
+        clearRole();
         closeProfileWindow(true);
         closeModal();
         closeEditor(false);
@@ -2898,29 +2898,24 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   document.getElementById('edClose').addEventListener('click', () => closeEditor(false));
 
   // save
-  document.getElementById('edSave').addEventListener('click', () => {
+  document.getElementById('edSave').addEventListener('click', async () => {
     if (!blocks.length) { flash('Добавьте хотя бы один вопрос'); return; }
     if (!validateRequired()) return;
     const rec = {
+      id: editingIndex >= 0 ? drafts[editingIndex]?.id : undefined,
       title: edTitle.value.trim() || 'Без названия',
       desc: document.getElementById('edDesc').value.trim(),
-      author: currentUser?.user || 'Преподаватель',
-      authorId: currentUser?.sid || currentUser?.user || '',
       scale: { ...curScale },
       blocks: JSON.parse(JSON.stringify(blocks)),
-      count: blocks.length,
-      pts: blocks.reduce((s, b) => s + (+b.pts || 0), 0),
-      date: new Date().toLocaleDateString('ru-RU')
     };
-    if (editingIndex >= 0) drafts[editingIndex] = rec;
-    else { drafts.push(rec); editingIndex = drafts.length - 1; }
-    saved = drafts;
-    published = drafts;
-    renderDrafts();
-    renderManage();
-    renderHome();
-    saveDB();
-    flash('Тест сохранён и опубликован ✓');
+    try {
+      const data = await api('/api/tests', { method: 'POST', body: JSON.stringify(rec) });
+      await syncServer();
+      editingIndex = drafts.findIndex(t => t.id === data.test.id);
+      flash('Тест сохранён на сервере и опубликован ✓');
+    } catch (error) {
+      flash(error.message);
+    }
   });
 
   function renderDrafts() {
@@ -3101,11 +3096,16 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   }
   delInput.addEventListener('input', () =>
     delGo.classList.toggle('ready', delInput.value.trim() === drafts[delIdx]?.title));
-  delGo.addEventListener('click', () => {
-    drafts.splice(delIdx, 1);
-    saved = drafts; published = drafts;
-    saveDB();
-    renderManage(); renderDrafts(); renderHome(); renderAdmin(); hideDlgs();
+  delGo.addEventListener('click', async () => {
+    const test = drafts[delIdx];
+    if (!test) return;
+    try {
+      await api('/api/tests/' + encodeURIComponent(test.id), { method: 'DELETE' });
+      hideDlgs();
+      await syncServer();
+    } catch (error) {
+      delInput.value = error.message;
+    }
   });
 
   // access settings
@@ -3120,22 +3120,39 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     accIdx = i;
     const t = drafts[i];
     t.acc = t.acc || 'open';
-    t.code = t.code || Math.random().toString(36).slice(2, 8).toUpperCase();
     document.getElementById('accName').textContent = t.title;
-    accPass.value = t.pass || '';
+    accPass.value = '';
     document.getElementById('accQrCode').textContent = t.code;
     const link = `https://IdrisStudy.bothost.tech/?test=${encodeURIComponent(t.code)}`;
-    t.link = link;
     document.getElementById('accQrImg').src =
       'https://api.qrserver.com/v1/create-qr-code/?size=300x300&margin=1&data=' + encodeURIComponent(link);
-    saveDB();
     paintAcc(t.acc);
     showDlg(accDlg);
   }
-  accDlg.querySelectorAll('.acc-opt').forEach(o => o.addEventListener('click', () => {
-    drafts[accIdx].acc = o.dataset.acc; paintAcc(o.dataset.acc); renderManage(); renderHome();
+  async function persistAccess(mode, password = '') {
+    const test = drafts[accIdx];
+    if (!test) return;
+    try {
+      await api(`/api/tests/${encodeURIComponent(test.id)}/access`, {
+        method: 'POST', body: JSON.stringify({ mode, password })
+      });
+      await syncServer();
+      paintAcc(mode);
+    } catch (error) {
+      document.getElementById('accName').textContent = error.message;
+    }
+  }
+  accDlg.querySelectorAll('.acc-opt').forEach(o => o.addEventListener('click', async () => {
+    paintAcc(o.dataset.acc);
+    if (o.dataset.acc === 'pass') {
+      accPass.focus();
+    } else {
+      await persistAccess(o.dataset.acc);
+    }
   }));
-  accPass.addEventListener('input', () => drafts[accIdx].pass = accPass.value);
+  accPass.addEventListener('change', () => {
+    if (accPass.value.trim()) persistAccess('pass', accPass.value);
+  });
 
   /* ================= auth ================= */
   let authed = false;
@@ -3156,40 +3173,69 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   }
   document.getElementById('loginCancel').addEventListener('click', closeLogin);
 
-  /* ---------- accounts ---------- */
-  /* ---------- persistent storage ---------- */
-  const DB_KEY = 'idris_study_db';
-  const DB = {
-    accounts: [
-      { user: 'Екатерина Леонидовна', pass: 'EkaterinaL26', role: 'staff', short: 'ЕЛ', title: 'Преподаватель', sid: 'IDR-1001' },
-      { user: 'Самир Гамидов', pass: 'Fakiza2015', role: 'dev', short: 'СГ', title: 'Разработчик', sid: 'IDR-0001' },
-    ],
-    tests: [], maint: { on: false, text: 'Ведутся технические работы. Скоро вернёмся!' },
-    prefs: {}, session: null
-  };
-  function saveDB() {
-    DB.tests = drafts;
-    try { localStorage.setItem(DB_KEY, JSON.stringify(DB)); } catch (e) {}
-  }
-  function loadDB() {
-    try {
-      const raw = localStorage.getItem(DB_KEY);
-      if (!raw) return;
-      const d = JSON.parse(raw);
-      if (d.accounts?.length) DB.accounts.splice(0, DB.accounts.length, ...d.accounts);
-      // Миграция встроенных учётных записей по ID, без зависимости от отображаемого имени.
-      const staffAccount = DB.accounts.find(a => a.sid === 'IDR-1001');
-      if (staffAccount) staffAccount.pass = 'EkaterinaL26';
-      const devAccount = DB.accounts.find(a => a.sid === 'IDR-0001');
-      if (devAccount) devAccount.pass = 'Fakiza2015';
-      if (d.tests) { drafts = d.tests; saved = drafts; published = drafts; }
-      if (d.maint) DB.maint = d.maint;
-      if (d.prefs) DB.prefs = d.prefs;
-      DB.session = d.session || null;
-    } catch (e) {}
-  }
-  const accounts = DB.accounts;
+  /* ---------- server API ---------- */
+  const DB = { maint: { on: false, text: 'Ведутся технические работы. Скоро вернёмся!' } };
+  let serverAdmin = null;
+  let syncBusy = false;
   let currentUser = null;
+
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      credentials: 'same-origin',
+      ...options,
+      headers: options.body
+        ? { 'Content-Type': 'application/json', ...(options.headers || {}) }
+        : (options.headers || {})
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Ошибка сервера');
+    return data;
+  }
+
+  function saveDB() {
+    // Внешний вид остаётся локальным для конкретного устройства. Аккаунты и тесты хранятся на сервере.
+  }
+
+  function clearRole() {
+    authed = false;
+    currentUser = null;
+    root.classList.remove('role-student', 'role-staff', 'role-dev');
+  }
+
+  async function syncServer({ quiet = true } = {}) {
+    if (syncBusy) return;
+    syncBusy = true;
+    try {
+      const activeStatsId = stIdx >= 0 ? drafts[stIdx]?.id : null;
+      const data = await api('/api/bootstrap');
+      published = data.tests || [];
+      drafts = data.drafts || [];
+      saved = drafts;
+      serverAdmin = data.admin || null;
+      DB.maint = data.maintenance || DB.maint;
+      if (data.me) {
+        data.me.attempts = data.attempts || [];
+        applyRole(data.me);
+      } else {
+        clearRole();
+      }
+      renderHome();
+      renderDrafts();
+      renderManage();
+      renderMyTests();
+      renderAdmin();
+      applyMaint();
+      if (mgStats.style.display !== 'none' && stIdx >= 0) {
+        stIdx = drafts.findIndex(t => t.id === activeStatsId);
+        if (stIdx >= 0) renderStats();
+        else swapView(mgStats, mgMain, 'Управление');
+      }
+    } catch (error) {
+      if (!quiet) flash(error.message);
+    } finally {
+      syncBusy = false;
+    }
+  }
 
   // tabs
   document.querySelectorAll('#authTabs button').forEach(b => b.addEventListener('click', () => {
@@ -3213,10 +3259,9 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     authed = true;
     root.classList.remove('role-student', 'role-staff', 'role-dev');
     root.classList.add('role-' + acc.role);
-    DB.session = acc.user; saveDB();
     renderMyTests();
     renderAdmin();
-    document.getElementById('tgState').textContent = acc.tg ? 'Подключено: ' + acc.tg : 'Не подключено';
+    document.getElementById('tgState').textContent = acc.tg ? 'Telegram подключён' : 'Не подключено';
     // подставляем данные в профиль
     document.querySelector('.prof-avatar').firstChild.textContent = acc.short;
     document.querySelector('.pcard-av').firstChild.textContent = acc.short;
@@ -3228,45 +3273,50 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       (acc.group ? ' · группа ' + esc(acc.group) : ' · IDRIS STUDY') + badge;
   }
 
-  document.getElementById('loginGo').addEventListener('click', () => {
-    const u = document.getElementById('loginUser').value.trim().toLowerCase();
-    const p = document.getElementById('loginPass').value;
-    const acc = accounts.find(a => a.user.toLowerCase() === u && a.pass === p);
-    if (!acc) { loginErr.classList.add('show'); return; }
-    applyRole(acc);
-    closeLogin();
-    setTimeout(() => toggleProf(true), 220);
+  document.getElementById('loginGo').addEventListener('click', async () => {
+    try {
+      const data = await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          user: document.getElementById('loginUser').value.trim(),
+          password: document.getElementById('loginPass').value
+        })
+      });
+      loginErr.classList.remove('show');
+      applyRole(data.user);
+      await syncServer();
+      closeLogin();
+      setTimeout(() => toggleProf(true), 220);
+    } catch (error) {
+      loginErr.textContent = error.message;
+      loginErr.classList.add('show');
+    }
   });
 
-  document.getElementById('regGo').addEventListener('click', () => {
+  document.getElementById('regGo').addEventListener('click', async () => {
     const name = document.getElementById('regName').value.trim();
     const pass = document.getElementById('regPass').value;
     const group = document.getElementById('regGroup').value.trim();
     const err = document.getElementById('regErr');
-    if (!name || pass.length < 4 || (regRole === 'student' && !group)) {
-      err.textContent = 'Заполните все поля, пароль от 4 символов';
-      err.classList.add('show'); return;
-    }
-    if (accounts.some(a => a.user.toLowerCase() === name.toLowerCase())) {
-      err.textContent = 'Такой пользователь уже существует';
+    if (!name || pass.length < 6 || (regRole === 'student' && !group)) {
+      err.textContent = 'Заполните все поля, пароль от 6 символов';
       err.classList.add('show'); return;
     }
     const sid = document.getElementById('regId').value.trim();
-    if (regRole === 'staff' && !/^IDR-\d{4}$/i.test(sid)) {
-      err.textContent = 'ID сотрудника в формате IDR-0000';
-      err.classList.add('show'); return;
+    try {
+      const data = await api('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ name, password: pass, role: regRole, group, employee_id: sid })
+      });
+      err.classList.remove('show');
+      applyRole(data.user);
+      await syncServer();
+      closeLogin();
+      setTimeout(() => toggleProf(true), 220);
+    } catch (error) {
+      err.textContent = error.message;
+      err.classList.add('show');
     }
-    const acc = {
-      user: name, pass, role: regRole, group, sid,
-      short: name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase(),
-      title: regRole === 'student' ? 'Студент' : 'Сотрудник IDRIS',
-      attempts: []
-    };
-    accounts.push(acc); saveDB();
-    err.classList.remove('show');
-    applyRole(acc);
-    closeLogin();
-    setTimeout(() => toggleProf(true), 220);
   });
 
   /* ================= published tests → home ================= */
@@ -3302,7 +3352,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
 
   function requestAccess(i) {
     const t = published[i];
-    if (!t.acc || t.acc === 'open') { openTestCard(i); return; }
+    if (!t.acc || t.acc === 'open') { quizToken = ''; quizCredential = ''; openTestCard(i); return; }
     gateIdx = i;
     const isQr = t.acc === 'qr';
     document.getElementById('gateT').textContent = isQr ? 'Доступ по QR-коду' : 'Тест защищён паролем';
@@ -3314,13 +3364,23 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     document.getElementById('gateErr').style.display = 'none';
     showDlg(gateDlg);
   }
-  document.getElementById('gateGo').addEventListener('click', () => {
+  document.getElementById('gateGo').addEventListener('click', async () => {
     const t = published[gateIdx];
     const v = gateInput.value.trim();
-    const ok = t.acc === 'qr' ? v.toUpperCase() === t.code : v === (t.pass || '');
-    if (!ok) { document.getElementById('gateErr').style.display = ''; return; }
-    hideDlgs();
-    setTimeout(() => openTestCard(gateIdx), 200);
+    try {
+      const data = await api(`/api/tests/${encodeURIComponent(t.id)}/open`, {
+        method: 'POST', body: JSON.stringify({ credential: v })
+      });
+      quizToken = data.token;
+      quizCredential = v;
+      plBlocks = data.blocks;
+      document.getElementById('gateErr').style.display = 'none';
+      hideDlgs();
+      setTimeout(() => openTestCard(gateIdx), 200);
+    } catch (error) {
+      document.getElementById('gateErr').textContent = error.message;
+      document.getElementById('gateErr').style.display = '';
+    }
   });
 
   function openTestCard(i) {
@@ -3349,19 +3409,31 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   const playerFull = document.getElementById('playerFull');
   const plBody = document.getElementById('plBody');
   const plToast = document.getElementById('plToast');
-  let answers = {}, plBlocks = [], plPending = null;
+  let answers = {}, plBlocks = [], plPending = null, quizToken = '', quizCredential = '';
 
   let student = null;
   document.getElementById('tcStart').addEventListener('click', () => {
     closeTestCard();
     setTimeout(() => showDlg(document.getElementById('stuDlg')), 180);
   });
-  document.getElementById('stuGo').addEventListener('click', () => {
+  document.getElementById('stuGo').addEventListener('click', async () => {
     const f = stuFirst.value.trim(), l = stuLast.value.trim(), g = stuGroup.value.trim();
     if (!f || !l || !g) { document.getElementById('stuErr').style.display = ''; return; }
     student = { name: f + ' ' + l, group: g };
+    try {
+      if (!quizToken) {
+        const data = await api(`/api/tests/${encodeURIComponent(curTest.id)}/open`, {
+          method: 'POST', body: JSON.stringify({ credential: '' })
+        });
+        quizToken = data.token;
+        plBlocks = data.blocks;
+      }
+    } catch (error) {
+      document.getElementById('stuErr').textContent = error.message;
+      document.getElementById('stuErr').style.display = '';
+      return;
+    }
     hideDlgs();
-    plBlocks = curTest.blocks;
     answers = {};
     document.getElementById('plTitle').textContent = curTest.title;
     document.getElementById('plProgress').textContent = `${student.name} · гр. ${student.group} · ${plBlocks.length} вопр.`;
@@ -3411,7 +3483,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       el.addEventListener('input', () => answers[+el.dataset.q] = el.value));
   }
 
-  document.getElementById('plFinish').addEventListener('click', () => {
+  document.getElementById('plFinish').addEventListener('click', async () => {
     const missIdx = plBlocks.findIndex(b => {
       if (!b.req) return false;
       const a = answers[b.id];
@@ -3426,56 +3498,29 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       plToast._t = setTimeout(() => plToast.classList.remove('show'), 7000);
       return;
     }
-    let score = 0;
-    const review = plBlocks.map(b => {
-      const a = answers[b.id];
-      let ok = false, yours = '—', right = '';
-      if (b.type === 'text') {
-        yours = String(a || '').trim() || '—';
-        right = b.answer;
-        ok = !!b.answer.trim() && yours.toLowerCase() === b.answer.trim().toLowerCase();
-      } else {
-        const ci = b.opts.map((o, i) => o.ok ? i : -1).filter(i => i >= 0);
-        const got = (a || []).slice().sort((x, y) => x - y);
-        yours = got.length ? got.map(i => b.opts[i]?.t || `Вариант ${i + 1}`).join(', ') : '—';
-        right = ci.map(i => b.opts[i]?.t || `Вариант ${i + 1}`).join(', ');
-        ok = ci.length > 0 && got.join(',') === ci.slice().sort((x, y) => x - y).join(',');
-      }
-      if (ok) score += +b.pts || 0;
-      return { q: b.q || 'Без текста', ok, yours, right, pts: b.pts };
-    });
-
-    const pct = curTest.pts ? Math.round(score / curTest.pts * 100) : 0;
-    const mark = gradeOf(score, curTest);
-    const grade = `Оценка ${mark} · ` + ({5:'отлично',4:'хорошо',3:'удовлетворительно',2:'нужно повторить'}[mark]);
-    curTest.runs = (curTest.runs || 0) + 1;
-    curTest.sum = (curTest.sum || 0) + score;
-    curTest.best = Math.max(curTest.best || 0, score);
-    curTest.records = curTest.records || [];
-    if (currentUser) {
-      currentUser.attempts = currentUser.attempts || [];
-      currentUser.attempts.unshift({ title: curTest.title, score, pts: curTest.pts, pct, grade: mark,
-        date: new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) });
-      renderMyTests();
-    }
-    saveDB();
-    curTest.records.unshift({ ...student, score, grade: mark, pts: curTest.pts, pct, date: new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) });
-    renderManage();
-    if (curTest.authorId) {
-      fetch('/api/telegram/notify', {
+    let result;
+    try {
+      result = await api(`/api/tests/${encodeURIComponent(curTest.id)}/submit`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          account_id: curTest.authorId,
-          student: student.name,
-          group: student.group,
-          test: curTest.title,
-          score,
-          total: curTest.pts,
-          grade: mark
+          token: quizToken,
+          answers,
+          student_name: student.name,
+          group: student.group
         })
-      }).catch(() => {});
+      });
+    } catch (error) {
+      document.getElementById('plToastTxt').textContent = error.message;
+      plToast.classList.add('show');
+      return;
     }
+    const score = result.score;
+    const pct = result.percent;
+    const mark = result.grade;
+    const review = result.review;
+    curTest.pts = result.total;
+    const grade = `Оценка ${mark} · ` + ({5:'отлично',4:'хорошо',3:'удовлетворительно',2:'нужно повторить'}[mark]);
+    syncServer();
 
     const C = 2 * Math.PI * 56;
     plBody.innerHTML = `<div class="res-wrap">
@@ -3522,8 +3567,18 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
           ${r.ok ? '' : `<div class="res-line res-right"><b>Правильный ответ:</b> ${esc(r.right || '—')}</div>`}
         </div>`;
     }));
-    document.getElementById('resAgain').addEventListener('click', () => {
-      answers = {}; renderPlayer();
+    document.getElementById('resAgain').addEventListener('click', async () => {
+      try {
+        const data = await api(`/api/tests/${encodeURIComponent(curTest.id)}/open`, {
+          method: 'POST', body: JSON.stringify({ credential: quizCredential })
+        });
+        quizToken = data.token;
+        plBlocks = data.blocks;
+        answers = {};
+        renderPlayer();
+      } catch (error) {
+        closePlayer();
+      }
     });
     document.getElementById('resExit').addEventListener('click', closePlayer);
     plToast.classList.remove('show');
@@ -3734,31 +3789,70 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     // разработчик продолжает видеть сайт
     maintOverlay.classList.toggle('on', DB.maint.on && currentUser?.role !== 'dev');
   }
-  maintSw.addEventListener('click', () => {
+  async function saveMaintenance() {
+    try {
+      const data = await api('/api/maintenance', {
+        method: 'POST',
+        body: JSON.stringify({ on: DB.maint.on, text: DB.maint.text })
+      });
+      DB.maint = data.maintenance;
+      applyMaint();
+    } catch (error) {
+      maintSw.classList.toggle('on', DB.maint.on);
+    }
+  }
+  maintSw.addEventListener('click', async () => {
     maintSw.classList.toggle('on');
     DB.maint.on = maintSw.classList.contains('on');
-    saveDB(); applyMaint();
+    applyMaint();
+    await saveMaintenance();
   });
-  maintText.addEventListener('input', () => { DB.maint.text = maintText.value; saveDB(); applyMaint(); });
-  document.getElementById('admWipe').addEventListener('click', () => {
-    localStorage.removeItem(DB_KEY);
-    location.reload();
+  let maintTimer;
+  maintText.addEventListener('input', () => {
+    DB.maint.text = maintText.value;
+    document.getElementById('maintMsg').textContent = DB.maint.text;
+    clearTimeout(maintTimer);
+    maintTimer = setTimeout(saveMaintenance, 500);
+  });
+  document.getElementById('admWipe').addEventListener('click', async () => {
+    if (!confirm('Удалить все тесты, результаты и обычные аккаунты? Действие необратимо.')) return;
+    try {
+      await api('/api/admin/wipe', { method: 'POST', body: '{}' });
+      await syncServer();
+    } catch (error) {
+      alert(error.message);
+    }
+  });
+  document.getElementById('admIdAdd').addEventListener('click', async () => {
+    const field = document.getElementById('admId');
+    const message = document.getElementById('admIdMsg');
+    try {
+      await api('/api/admin/employee-ids', {
+        method: 'POST', body: JSON.stringify({ code: field.value.trim() })
+      });
+      message.textContent = 'ID создан и готов к регистрации';
+      field.value = 'IDR-';
+    } catch (error) {
+      message.textContent = error.message;
+    }
   });
   function renderAdmin() {
-    document.getElementById('admAcc').textContent = accounts.length + ' зарегистрировано';
-    document.getElementById('admTests').textContent = drafts.length + ' активных';
-    document.getElementById('admRuns').textContent =
-      drafts.reduce((s, t) => s + (t.records?.length || 0), 0) + ' попыток';
+    document.getElementById('admAcc').textContent = (serverAdmin?.accounts || 0) + ' зарегистрировано';
+    document.getElementById('admTests').textContent = (serverAdmin?.tests || 0) + ' активных';
+    document.getElementById('admRuns').textContent = (serverAdmin?.attempts || 0) + ' попыток';
   }
 
-  loadDB();
-  const restoredAccount = accounts.find(a => a.user === DB.session);
-  if (restoredAccount) applyRole(restoredAccount);
-  applyMaint();
-  renderHome();
-  renderManage();
-  renderDrafts();
-  renderAdmin();
+  /* ================= live synchronization ================= */
+  syncServer({ quiet: false });
+  if ('EventSource' in window) {
+    const live = new EventSource('/api/events');
+    ['tests', 'attempts', 'accounts', 'maintenance', 'telegram', 'sync'].forEach(type =>
+      live.addEventListener(type, () => syncServer()));
+    live.onerror = () => {
+      // EventSource сам переподключается; периодическая синхронизация страхует прокси без SSE.
+    };
+  }
+  setInterval(() => syncServer(), 30000);
 
   // убираем нативные всплывающие подсказки браузера
   const killTitles = () => document.querySelectorAll('[title]').forEach(el => el.removeAttribute('title'));

@@ -1,59 +1,159 @@
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import secrets
-import socket
 import sqlite3
 import threading
 import time
+from collections import deque
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(
-    os.getenv("BOT_DB_PATH")
-    or (Path(os.getenv("DATA_DIR", str(BASE_DIR))) / "idris_bot.sqlite3")
-)
+DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR)))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = Path(os.getenv("BOT_DB_PATH", DATA_DIR / "idris_study.sqlite3"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-APP_URL = os.getenv("APP_URL", "https://IdrisStudy.bothost.tech").rstrip("/")
-PORT = int(os.getenv("PORT", "5000"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").lstrip("@").strip()
+APP_URL = os.getenv("APP_URL", "https://IdrisStudy.bothost.tech").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
-TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "polling").strip().lower()  # polling | webhook
+TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "polling").strip().lower()
+PORT = int(os.getenv("PORT", "5000"))
 RUN_WEB = os.getenv("RUN_WEB", "1") == "1"
+SESSION_TTL = 30 * 24 * 60 * 60
+QUIZ_TTL = 4 * 60 * 60
+LINK_TTL = 20 * 60
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 if not WEBHOOK_SECRET and BOT_TOKEN:
-    WEBHOOK_SECRET = hashlib.sha256(BOT_TOKEN.encode("utf-8")).hexdigest()[:48]
-
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-LINK_TTL = 20 * 60
+    WEBHOOK_SECRET = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:48]
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("idris-bot")
+log = logging.getLogger("idris-study")
 
 
-# ---------------- storage ----------------
+# ---------------- realtime ----------------
 
-def connect_db():
-    db = sqlite3.connect(DB_PATH, timeout=15)
+EVENT_COND = threading.Condition()
+EVENTS = deque(maxlen=200)
+EVENT_ID = 0
+
+
+def emit_event(kind="sync", payload=None):
+    global EVENT_ID
+    with EVENT_COND:
+        EVENT_ID += 1
+        EVENTS.append((EVENT_ID, kind, payload or {}))
+        EVENT_COND.notify_all()
+
+
+# ---------------- database ----------------
+
+def db_connect():
+    db = sqlite3.connect(DB_PATH, timeout=20)
     db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys=ON")
     return db
 
 
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
+    return f"pbkdf2_sha256$240000${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password, encoded):
+    try:
+        name, rounds, salt, expected = encoded.split("$", 3)
+        if name != "pbkdf2_sha256":
+            return False
+        got = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt), int(rounds)
+        ).hex()
+        return hmac.compare_digest(got, expected)
+    except Exception:
+        return False
+
+
 def init_db():
-    with connect_db() as db:
+    with db_connect() as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('student','staff','dev')),
+                group_name TEXT NOT NULL DEFAULT '',
+                employee_id TEXT UNIQUE COLLATE NOCASE,
+                initials TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS employee_ids (
+                code TEXT PRIMARY KEY COLLATE NOCASE,
+                active INTEGER NOT NULL DEFAULT 1,
+                used_by INTEGER REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tests (
+                id TEXT PRIMARY KEY,
+                author_id INTEGER NOT NULL REFERENCES users(id),
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                content_json TEXT NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                question_count INTEGER NOT NULL DEFAULT 0,
+                access_mode TEXT NOT NULL DEFAULT 'open',
+                access_hash TEXT NOT NULL DEFAULT '',
+                qr_code TEXT NOT NULL UNIQUE,
+                published INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS quiz_sessions (
+                token_hash TEXT PRIMARY KEY,
+                test_id TEXT NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_id TEXT NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                student_name TEXT NOT NULL,
+                group_name TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                total INTEGER NOT NULL,
+                grade INTEGER NOT NULL,
+                percent INTEGER NOT NULL,
+                review_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS pending_links (
                 code TEXT PRIMARY KEY,
                 account_id TEXT NOT NULL,
@@ -74,13 +174,186 @@ def init_db():
                 linked_at INTEGER NOT NULL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_pending_chat
-            ON pending_links(chat_id, status, created_at);
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_attempt_test ON attempts(test_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_session_expiry ON sessions(expires_at);
             """
         )
 
+        dev_name = os.getenv("DEV_NAME", "Самир Гамидов").strip()
+        dev_password = os.getenv("DEV_PASSWORD", "Fakiza2015")
+        if dev_name and not db.execute(
+            "SELECT 1 FROM users WHERE name=? COLLATE NOCASE", (dev_name,)
+        ).fetchone():
+            db.execute(
+                "INSERT INTO users(name,password_hash,role,employee_id,initials,title,created_at) VALUES(?,?,?,?,?,?,?)",
+                (dev_name, hash_password(dev_password), "dev", "IDR-0001", "СГ", "Разработчик", int(time.time())),
+            )
 
-# ---------------- telegram helpers ----------------
+        staff_name = os.getenv("STAFF_NAME", "").strip()
+        staff_password = os.getenv("STAFF_PASSWORD", "EkaterinaL26")
+        if staff_name and not db.execute(
+            "SELECT 1 FROM users WHERE name=? COLLATE NOCASE", (staff_name,)
+        ).fetchone():
+            db.execute(
+                "INSERT INTO users(name,password_hash,role,employee_id,initials,title,created_at) VALUES(?,?,?,?,?,?,?)",
+                (staff_name, hash_password(staff_password), "staff", "IDR-1001", make_initials(staff_name), "Преподаватель", int(time.time())),
+            )
+
+        db.execute("INSERT OR IGNORE INTO employee_ids(code) VALUES('IDR-1001')")
+        db.execute(
+            "UPDATE employee_ids SET used_by=(SELECT id FROM users WHERE employee_id='IDR-1001') "
+            "WHERE code='IDR-1001' AND EXISTS(SELECT 1 FROM users WHERE employee_id='IDR-1001')"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES('maintenance',?)",
+            (json.dumps({"on": False, "text": "Ведутся технические работы. Скоро вернёмся!"}, ensure_ascii=False),),
+        )
+        now = int(time.time())
+        db.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+        db.execute("DELETE FROM quiz_sessions WHERE expires_at < ?", (now,))
+
+
+def make_initials(name):
+    return "".join(p[0] for p in name.split() if p)[:2].upper()
+
+
+def user_json(row):
+    return None if not row else {
+        "id": row["id"], "user": row["name"], "role": row["role"],
+        "group": row["group_name"], "sid": row["employee_id"] or "",
+        "short": row["initials"], "title": row["title"],
+    }
+
+
+def create_session(db, user_id):
+    token = secrets.token_urlsafe(36)
+    now = int(time.time())
+    db.execute(
+        "INSERT INTO sessions(token_hash,user_id,created_at,last_seen,expires_at) VALUES(?,?,?,?,?)",
+        (hashlib.sha256(token.encode()).hexdigest(), user_id, now, now, now + SESSION_TTL),
+    )
+    return token
+
+
+def get_setting(db, key, fallback):
+    row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    try:
+        return json.loads(row["value"]) if row else fallback
+    except Exception:
+        return fallback
+
+
+# ---------------- tests and grading ----------------
+
+def test_content(row):
+    try:
+        return json.loads(row["content_json"])
+    except Exception:
+        return {"blocks": [], "scale": None}
+
+
+def attempt_json(row):
+    return {
+        "name": row["student_name"], "group": row["group_name"],
+        "score": row["score"], "pts": row["total"], "grade": row["grade"],
+        "pct": row["percent"],
+        "date": time.strftime("%d.%m.%Y %H:%M", time.localtime(row["created_at"])),
+    }
+
+
+def fetch_test(db, test_id):
+    return db.execute(
+        "SELECT t.*,u.name author_name FROM tests t JOIN users u ON u.id=t.author_id WHERE t.id=?",
+        (test_id,),
+    ).fetchone()
+
+
+def serialize_test(db, row, owner=False):
+    content = test_content(row)
+    out = {
+        "id": row["id"], "title": row["title"], "desc": row["description"],
+        "author": row["author_name"], "authorId": str(row["author_id"]),
+        "count": row["question_count"], "pts": row["points"],
+        "acc": row["access_mode"],
+        "date": time.strftime("%d.%m.%Y", time.localtime(row["updated_at"])),
+    }
+    if owner:
+        records = [
+            attempt_json(a) for a in db.execute(
+                "SELECT * FROM attempts WHERE test_id=? ORDER BY created_at DESC", (row["id"],)
+            ).fetchall()
+        ]
+        out.update(
+            blocks=content.get("blocks", []), scale=content.get("scale"),
+            code=row["qr_code"], records=records, runs=len(records),
+            sum=sum(a["score"] for a in records),
+            best=max((a["score"] for a in records), default=0),
+        )
+    return out
+
+
+def public_blocks(blocks):
+    result = []
+    for block in blocks:
+        item = {
+            "id": block.get("id"), "type": block.get("type"),
+            "q": block.get("q", ""), "pts": int(block.get("pts") or 0),
+            "img": block.get("img"), "req": bool(block.get("req")),
+        }
+        if item["type"] != "text":
+            item["opts"] = [{"t": opt.get("t", "")} for opt in block.get("opts", [])]
+        result.append(item)
+    return result
+
+
+def grade_for(score, total, scale):
+    if scale:
+        if score >= int(scale.get("g5", total + 1)):
+            return 5
+        if score >= int(scale.get("g4", total + 1)):
+            return 4
+        if score >= int(scale.get("g3", total + 1)):
+            return 3
+        return 2
+    pct = score / total * 100 if total else 0
+    return 5 if pct >= 90 else 4 if pct >= 75 else 3 if pct >= 50 else 2
+
+
+def calculate_result(content, answers):
+    score = 0
+    review = []
+    for block in content.get("blocks", []):
+        bid = str(block.get("id"))
+        answer = answers.get(bid, answers.get(block.get("id")))
+        ok, yours, right = False, "—", ""
+        if block.get("type") == "text":
+            expected = str(block.get("answer", "")).strip()
+            yours = str(answer or "").strip() or "—"
+            right = expected
+            ok = bool(expected) and yours.casefold() == expected.casefold()
+        else:
+            opts = block.get("opts", [])
+            correct = [i for i, opt in enumerate(opts) if opt.get("ok")]
+            got = sorted(int(i) for i in (answer or []) if str(i).isdigit())
+            yours = ", ".join(opts[i].get("t", f"Вариант {i + 1}") for i in got if i < len(opts)) or "—"
+            right = ", ".join(opts[i].get("t", f"Вариант {i + 1}") for i in correct)
+            ok = bool(correct) and got == sorted(correct)
+        pts = int(block.get("pts") or 0)
+        if ok:
+            score += pts
+        review.append({"id": block.get("id"), "q": block.get("q", ""), "ok": ok, "yours": yours, "right": right, "pts": pts})
+    total = sum(int(b.get("pts") or 0) for b in content.get("blocks", []))
+    percent = round(score / total * 100) if total else 0
+    grade = grade_for(score, total, content.get("scale"))
+    return score, total, percent, grade, review
+
+
+# ---------------- Telegram ----------------
 
 def normalize_phone(value):
     digits = re.sub(r"\D", "", str(value or ""))
@@ -92,9 +365,7 @@ def normalize_phone(value):
 def telegram(method, payload=None):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not configured")
-    response = requests.post(
-        f"{TELEGRAM_API}/{method}", json=payload or {}, timeout=45
-    )
+    response = requests.post(f"{TELEGRAM_API}/{method}", json=payload or {}, timeout=45)
     response.raise_for_status()
     data = response.json()
     if not data.get("ok"):
@@ -111,416 +382,547 @@ def send_message(chat_id, text, reply_markup=None):
 
 def current_bot_username():
     global BOT_USERNAME
-    if BOT_USERNAME:
-        return BOT_USERNAME
-    try:
+    if not BOT_USERNAME and BOT_TOKEN:
         BOT_USERNAME = telegram("getMe").get("username", "")
-    except Exception as exc:
-        log.warning("Unable to read bot username: %s", exc)
     return BOT_USERNAME
 
 
 def configure_webhook():
-    telegram(
-        "setWebhook",
-        {
-            "url": f"{APP_URL}/telegram/webhook",
-            "secret_token": WEBHOOK_SECRET,
-            "allowed_updates": ["message"],
-            "drop_pending_updates": False,
-        },
-    )
-    log.info("Telegram webhook configured: %s/telegram/webhook", APP_URL)
-
-
-def remove_keyboard():
-    return {"remove_keyboard": True}
-
-
-def contact_keyboard():
-    return {
-        "keyboard": [[{"text": "Поделиться номером", "request_contact": True}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": True,
-    }
-
-
-def start_link(message, code):
-    chat_id = message["chat"]["id"]
-    user_id = message["from"]["id"]
-    now = int(time.time())
-    with connect_db() as db:
-        row = db.execute(
-            "SELECT * FROM pending_links WHERE code = ? AND created_at >= ?",
-            (code.upper(), now - LINK_TTL),
-        ).fetchone()
-        if not row or row["status"] == "confirmed":
-            send_message(
-                chat_id,
-                "Код привязки не найден или уже истёк. Создайте новый код в профиле IDRIS STUDY.",
-            )
-            return
-        db.execute(
-            "UPDATE pending_links SET chat_id = ?, telegram_user_id = ? WHERE code = ?",
-            (chat_id, user_id, code.upper()),
-        )
-
-    send_message(
-        chat_id,
-        "Почти готово. Подтвердите номер телефона кнопкой ниже. Telegram отправит номер только этому боту.",
-        contact_keyboard(),
-    )
-
-
-def confirm_contact(message):
-    chat_id = message["chat"]["id"]
-    sender_id = message["from"]["id"]
-    contact = message.get("contact") or {}
-    contact_user_id = contact.get("user_id")
-
-    if contact_user_id and contact_user_id != sender_id:
-        send_message(chat_id, "Нужно отправить именно свой номер телефона.")
-        return
-
-    now = int(time.time())
-    with connect_db() as db:
-        row = db.execute(
-            """
-            SELECT * FROM pending_links
-            WHERE chat_id = ? AND status = 'pending' AND created_at >= ?
-            ORDER BY created_at DESC LIMIT 1
-            """,
-            (chat_id, now - LINK_TTL),
-        ).fetchone()
-        if not row:
-            send_message(
-                chat_id,
-                "Активной привязки нет. Сначала получите новую ссылку в профиле IDRIS STUDY.",
-                remove_keyboard(),
-            )
-            return
-
-        expected = normalize_phone(row["phone"])
-        received = normalize_phone(contact.get("phone_number"))
-        if not expected or expected[-10:] != received[-10:]:
-            send_message(
-                chat_id,
-                "Этот номер не совпадает с номером, введённым на сайте. Создайте привязку заново.",
-                remove_keyboard(),
-            )
-            return
-
-        username = message.get("from", {}).get("username", "")
-        db.execute(
-            "DELETE FROM telegram_links WHERE chat_id = ? OR account_id = ?",
-            (chat_id, row["account_id"]),
-        )
-        db.execute(
-            """
-            INSERT INTO telegram_links
-                (account_id, chat_id, phone, telegram_user_id, telegram_username, linked_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (row["account_id"], chat_id, received, sender_id, username, now),
-        )
-        db.execute(
-            "UPDATE pending_links SET status = 'confirmed' WHERE code = ?",
-            (row["code"],),
-        )
-
-    send_message(
-        chat_id,
-        "Telegram успешно подключён к аккаунту IDRIS STUDY. Теперь сюда будут приходить уведомления о прохождениях тестов.",
-        remove_keyboard(),
-    )
+    telegram("setWebhook", {"url": f"{APP_URL}/telegram/webhook", "secret_token": WEBHOOK_SECRET, "allowed_updates": ["message"]})
 
 
 def handle_update(update):
     message = update.get("message") or {}
     if not message or message.get("chat", {}).get("type") != "private":
         return
-
     chat_id = message["chat"]["id"]
-    if message.get("contact"):
-        confirm_contact(message)
+    sender_id = message.get("from", {}).get("id")
+    contact = message.get("contact")
+    if contact:
+        if contact.get("user_id") and contact.get("user_id") != sender_id:
+            send_message(chat_id, "Нужно отправить именно свой номер телефона.")
+            return
+        now = int(time.time())
+        with db_connect() as db:
+            row = db.execute("SELECT * FROM pending_links WHERE chat_id=? AND status='pending' AND created_at>=? ORDER BY created_at DESC LIMIT 1", (chat_id, now - LINK_TTL)).fetchone()
+            if not row:
+                send_message(chat_id, "Активной привязки нет. Создайте новую ссылку в профиле.", {"remove_keyboard": True})
+                return
+            got = normalize_phone(contact.get("phone_number"))
+            if normalize_phone(row["phone"])[-10:] != got[-10:]:
+                send_message(chat_id, "Номер не совпадает с указанным на сайте.", {"remove_keyboard": True})
+                return
+            db.execute("DELETE FROM telegram_links WHERE chat_id=? OR account_id=?", (chat_id, row["account_id"]))
+            db.execute("INSERT INTO telegram_links(account_id,chat_id,phone,telegram_user_id,telegram_username,linked_at) VALUES(?,?,?,?,?,?)", (row["account_id"], chat_id, got, sender_id, message.get("from", {}).get("username", ""), now))
+            db.execute("UPDATE pending_links SET status='confirmed' WHERE code=?", (row["code"],))
+        send_message(chat_id, "Telegram подключён. Уведомления IDRIS STUDY включены.", {"remove_keyboard": True})
+        emit_event("telegram")
         return
 
     text = (message.get("text") or "").strip()
     if text.startswith("/start"):
         parts = text.split(maxsplit=1)
-        if len(parts) == 2 and re.fullmatch(r"[A-Z0-9]{6}", parts[1].upper()):
-            start_link(message, parts[1])
-        else:
-            send_message(
-                chat_id,
-                "Я бот уведомлений IDRIS STUDY. Откройте профиль на сайте, укажите номер и перейдите по выданной ссылке.",
-            )
-        return
+        code = parts[1].upper() if len(parts) == 2 else ""
+        with db_connect() as db:
+            row = db.execute("SELECT * FROM pending_links WHERE code=? AND created_at>=?", (code, int(time.time()) - LINK_TTL)).fetchone()
+            if not row or row["status"] == "confirmed":
+                send_message(chat_id, "Ссылка истекла. Получите новую в профиле IDRIS STUDY.")
+                return
+            db.execute("UPDATE pending_links SET chat_id=?,telegram_user_id=? WHERE code=?", (chat_id, sender_id, code))
+        send_message(chat_id, "Подтвердите свой номер телефона.", {"keyboard": [[{"text": "Поделиться номером", "request_contact": True}]], "resize_keyboard": True, "one_time_keyboard": True})
+    elif text == "/status":
+        with db_connect() as db:
+            linked = db.execute("SELECT 1 FROM telegram_links WHERE chat_id=?", (chat_id,)).fetchone()
+        send_message(chat_id, "Аккаунт подключён." if linked else "Аккаунт не подключён.")
+    elif text == "/unlink":
+        with db_connect() as db:
+            db.execute("DELETE FROM telegram_links WHERE chat_id=?", (chat_id,))
+        send_message(chat_id, "Привязка удалена.", {"remove_keyboard": True})
+    else:
+        send_message(chat_id, "Команды: /status и /unlink")
 
-    if text == "/status":
-        with connect_db() as db:
-            row = db.execute(
-                "SELECT account_id FROM telegram_links WHERE chat_id = ?", (chat_id,)
-            ).fetchone()
-        send_message(chat_id, "Аккаунт подключён." if row else "Аккаунт пока не подключён.")
-        return
-
-    if text == "/unlink":
-        with connect_db() as db:
-            db.execute("DELETE FROM telegram_links WHERE chat_id = ?", (chat_id,))
-        send_message(chat_id, "Привязка удалена.", remove_keyboard())
-        return
-
-    send_message(chat_id, "Доступные команды: /status и /unlink")
-
-
-# ---------------- long polling ----------------
 
 def polling_loop():
     log.info("Telegram long polling started")
     try:
         telegram("deleteWebhook", {"drop_pending_updates": False})
     except Exception as exc:
-        log.warning("deleteWebhook failed: %s", exc)
+        log.warning("deleteWebhook: %s", exc)
     offset = None
     while True:
         try:
-            updates = telegram(
-                "getUpdates",
-                {"timeout": 25, "offset": offset, "allowed_updates": ["message"]},
-            )
-            for upd in updates:
-                offset = upd["update_id"] + 1
+            updates = telegram("getUpdates", {"timeout": 25, "offset": offset, "allowed_updates": ["message"]})
+            for update in updates:
+                offset = update["update_id"] + 1
                 try:
-                    handle_update(upd)
+                    handle_update(update)
                 except Exception:
-                    log.exception("Error while handling update")
+                    log.exception("Telegram update error")
         except Exception as exc:
-            if "Conflict" in str(exc):
-                try:
-                    telegram("deleteWebhook", {"drop_pending_updates": False})
-                except Exception:
-                    pass
             log.warning("Polling error: %s", exc)
             time.sleep(4)
 
 
-# ---------------- http api (stdlib only) ----------------
-
-def api_create_link(data):
-    account_id = str(data.get("account_id", "")).strip()[:80]
-    display_name = str(data.get("display_name", "")).strip()[:120]
-    phone = normalize_phone(data.get("phone"))
-    if not account_id or len(phone) < 10:
-        return 400, {"ok": False, "error": "Укажите аккаунт и корректный номер"}
-
-    code = secrets.token_hex(3).upper()
-    now = int(time.time())
-    with connect_db() as db:
-        db.execute("DELETE FROM pending_links WHERE account_id = ?", (account_id,))
-        db.execute(
-            "INSERT INTO pending_links (code, account_id, display_name, phone, status, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?)",
-            (code, account_id, display_name, phone, now),
-        )
-    username = current_bot_username()
-    bot_url = f"https://t.me/{username}?start={code}" if username else ""
-    return 200, {"ok": True, "code": code, "bot_url": bot_url, "expires_in": LINK_TTL}
+def notify_author(account_id, text):
+    if not BOT_TOKEN:
+        return
+    with db_connect() as db:
+        row = db.execute("SELECT chat_id FROM telegram_links WHERE account_id=?", (str(account_id),)).fetchone()
+    if row:
+        try:
+            send_message(row["chat_id"], text)
+        except Exception:
+            log.exception("Telegram notification failed")
 
 
-def api_link_status(code):
-    code = code.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]{6}", code):
-        return 400, {"ok": False, "linked": False}
-    with connect_db() as db:
-        row = db.execute(
-            "SELECT status, phone FROM pending_links WHERE code = ?", (code,)
-        ).fetchone()
-    return 200, {
-        "ok": True,
-        "linked": bool(row and row["status"] == "confirmed"),
-        "phone": row["phone"] if row and row["status"] == "confirmed" else None,
-    }
-
-
-def api_unlink(data):
-    account_id = str(data.get("account_id", "")).strip()[:80]
-    if not account_id:
-        return 400, {"ok": False}
-    with connect_db() as db:
-        db.execute("DELETE FROM telegram_links WHERE account_id = ?", (account_id,))
-        db.execute("DELETE FROM pending_links WHERE account_id = ?", (account_id,))
-    return 200, {"ok": True}
-
-
-def api_notify(data):
-    account_id = str(data.get("account_id", "")).strip()[:80]
-    if not account_id:
-        return 400, {"ok": False, "error": "account_id is required"}
-    with connect_db() as db:
-        row = db.execute(
-            "SELECT chat_id FROM telegram_links WHERE account_id = ?", (account_id,)
-        ).fetchone()
-    if not row:
-        return 200, {"ok": True, "delivered": False}
-
-    text = (
-        "Новое прохождение теста\n\n"
-        f"Тест: {str(data.get('test', 'Тест'))[:160]}\n"
-        f"Студент: {str(data.get('student', 'Студент'))[:120]}\n"
-        f"Группа: {str(data.get('group', '—'))[:50]}\n"
-        f"Результат: {str(data.get('score', '0'))[:12]} из {str(data.get('total', '0'))[:12]}\n"
-        f"Оценка: {str(data.get('grade', '—'))[:4]}"
-    )
-    try:
-        send_message(row["chat_id"], text)
-    except Exception:
-        log.exception("Unable to deliver notification")
-        return 502, {"ok": False, "delivered": False}
-    return 200, {"ok": True, "delivered": True}
-
+# ---------------- HTTP server ----------------
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IdrisStudy/1.0"
+    server_version = "IdrisStudy/2.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         log.info("%s %s", self.address_string(), fmt % args)
 
-    def _headers(self, status, ctype, length):
+    def headers_out(self, status, content_type, length=None, extra=None):
         self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(length))
+        self.send_header("Content-Type", content_type)
+        if length is not None:
+            self.send_header("Content-Length", str(length))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Cache-Control", "no-store")
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
         self.end_headers()
 
-    def _send_json(self, payload, status=200):
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self._headers(status, "application/json; charset=utf-8", len(body))
+    def send_json(self, payload, status=200, extra=None):
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self.headers_out(status, "application/json; charset=utf-8", len(body), extra)
         self.wfile.write(body)
 
-    def _read_json(self):
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
-        if not length or length > 128 * 1024:
+    def read_json(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > 12 * 1024 * 1024:
             return {}
-        raw = self.rfile.read(length)
         try:
-            return json.loads(raw.decode("utf-8"))
+            return json.loads(self.rfile.read(length).decode())
         except Exception:
             return {}
 
-    def _serve_index(self, head=False):
-        path = BASE_DIR / "index.html"
-        try:
-            body = path.read_bytes()
-        except Exception:
-            self._headers(404, "text/plain; charset=utf-8", 0)
-            return
-        self._headers(200, "text/html; charset=utf-8", len(body))
+    def cookie_token(self):
+        jar = SimpleCookie(self.headers.get("Cookie", ""))
+        return jar.get("idris_session").value if jar.get("idris_session") else ""
+
+    def current_user(self, db):
+        token = self.cookie_token()
+        if not token:
+            return None
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        row = db.execute(
+            "SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
+            (token_hash, int(time.time())),
+        ).fetchone()
+        if row:
+            db.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", (int(time.time()), token_hash))
+        return row
+
+    def require_user(self, db, roles=None):
+        user = self.current_user(db)
+        if not user or (roles and user["role"] not in roles):
+            self.send_json({"ok": False, "error": "Требуется вход"}, 401)
+            return None
+        return user
+
+    def route(self):
+        return urlparse(self.path).path
+
+    def serve_index(self, head=False):
+        body = (BASE_DIR / "index.html").read_bytes()
+        self.headers_out(200, "text/html; charset=utf-8", len(body), {"Cache-Control": "no-cache"})
         if not head:
             self.wfile.write(body)
 
-    def _hidden_404(self):
-        self._send_json({"detail": "Not Found"}, 404)
-
     def do_HEAD(self):
-        self._serve_index(head=True)
+        self.serve_index(True)
 
     def do_GET(self):
         try:
-            url = urlparse(self.path)
-            path = url.path
-            if path == "/" or path == "/index.html":
-                self._serve_index()
+            path = self.route()
+            if path in ("/", "/index.html"):
+                self.serve_index()
             elif path == "/health":
-                self._send_json({
-                    "ok": True, "bot": bool(BOT_TOKEN), "mode": TELEGRAM_MODE,
-                    "webhook": f"{APP_URL}/telegram/webhook",
-                })
+                self.send_json({"ok": True, "bot": bool(BOT_TOKEN), "mode": TELEGRAM_MODE})
+            elif path == "/api/bootstrap":
+                self.api_bootstrap()
+            elif path == "/api/events":
+                self.api_events()
             elif path == "/api/telegram/link-status":
-                code = parse_qs(url.query).get("code", [""])[0]
-                status, payload = api_link_status(code)
-                self._send_json(payload, status)
+                code = parse_qs(urlparse(self.path).query).get("code", [""])[0].upper()
+                with db_connect() as db:
+                    row = db.execute("SELECT status,phone FROM pending_links WHERE code=?", (code,)).fetchone()
+                self.send_json({"ok": True, "linked": bool(row and row["status"] == "confirmed"), "phone": row["phone"] if row and row["status"] == "confirmed" else None})
             else:
-                self._hidden_404()
+                self.send_json({"detail": "Not Found"}, 404)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except Exception:
             log.exception("GET error")
+            try:
+                self.send_json({"ok": False, "error": "Server error"}, 500)
+            except Exception:
+                pass
 
     def do_POST(self):
         try:
-            path = urlparse(self.path).path
+            path = self.route()
             if path == "/telegram/webhook":
-                if WEBHOOK_SECRET:
-                    provided = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-                    if not secrets.compare_digest(provided, WEBHOOK_SECRET):
-                        self._send_json({"ok": False}, 403)
-                        return
-                try:
-                    handle_update(self._read_json())
-                except Exception:
-                    log.exception("Webhook update error")
-                self._send_json({"ok": True})
-            elif path == "/api/telegram/link":
-                status, payload = api_create_link(self._read_json())
-                self._send_json(payload, status)
-            elif path == "/api/telegram/unlink":
-                status, payload = api_unlink(self._read_json())
-                self._send_json(payload, status)
-            elif path == "/api/telegram/notify":
-                status, payload = api_notify(self._read_json())
-                self._send_json(payload, status)
-            else:
-                self._hidden_404()
+                provided = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+                if WEBHOOK_SECRET and not secrets.compare_digest(provided, WEBHOOK_SECRET):
+                    self.send_json({"ok": False}, 403)
+                    return
+                handle_update(self.read_json())
+                self.send_json({"ok": True})
+                return
+            routes = {
+                "/api/auth/login": self.api_login,
+                "/api/auth/register": self.api_register,
+                "/api/auth/logout": self.api_logout,
+                "/api/tests": self.api_save_test,
+                "/api/maintenance": self.api_maintenance,
+                "/api/admin/wipe": self.api_admin_wipe,
+                "/api/telegram/link": self.api_telegram_link,
+                "/api/telegram/unlink": self.api_telegram_unlink,
+                "/api/admin/employee-ids": self.api_employee_id,
+            }
+            if path in routes:
+                routes[path]()
+                return
+            match = re.fullmatch(r"/api/tests/([^/]+)/(access|open|submit)", path)
+            if match:
+                getattr(self, f"api_test_{match.group(2)}")(match.group(1))
+                return
+            self.send_json({"detail": "Not Found"}, 404)
         except Exception:
             log.exception("POST error")
+            try:
+                self.send_json({"ok": False, "error": "Server error"}, 500)
+            except Exception:
+                pass
 
+    def do_DELETE(self):
+        try:
+            match = re.fullmatch(r"/api/tests/([^/]+)", self.route())
+            if not match:
+                self.send_json({"detail": "Not Found"}, 404)
+                return
+            with db_connect() as db:
+                user = self.require_user(db, {"staff", "dev"})
+                if not user:
+                    return
+                row = fetch_test(db, match.group(1))
+                if not row or (user["role"] != "dev" and row["author_id"] != user["id"]):
+                    self.send_json({"ok": False}, 403)
+                    return
+                db.execute("DELETE FROM tests WHERE id=?", (row["id"],))
+            emit_event("tests")
+            self.send_json({"ok": True})
+        except Exception:
+            log.exception("DELETE error")
+            self.send_json({"ok": False}, 500)
 
-# ---------------- entry ----------------
+    def api_bootstrap(self):
+        with db_connect() as db:
+            user = self.current_user(db)
+            tests = [serialize_test(db, r) for r in db.execute("SELECT t.*,u.name author_name FROM tests t JOIN users u ON u.id=t.author_id WHERE published=1 ORDER BY updated_at DESC").fetchall()]
+            owned, attempts = [], []
+            if user and user["role"] in ("staff", "dev"):
+                sql = "SELECT t.*,u.name author_name FROM tests t JOIN users u ON u.id=t.author_id"
+                params = ()
+                if user["role"] != "dev":
+                    sql += " WHERE t.author_id=?"
+                    params = (user["id"],)
+                sql += " ORDER BY t.updated_at DESC"
+                owned = [serialize_test(db, r, True) for r in db.execute(sql, params).fetchall()]
+            if user:
+                attempts = [
+                    {**attempt_json(a), "title": a["test_title"]}
+                    for a in db.execute("SELECT a.*,t.title test_title FROM attempts a JOIN tests t ON t.id=a.test_id WHERE a.user_id=? ORDER BY a.created_at DESC", (user["id"],)).fetchall()
+                ]
+            maintenance = get_setting(db, "maintenance", {"on": False, "text": ""})
+            admin = None
+            if user and user["role"] == "dev":
+                admin = {
+                    "accounts": db.execute("SELECT COUNT(*) n FROM users").fetchone()["n"],
+                    "tests": db.execute("SELECT COUNT(*) n FROM tests").fetchone()["n"],
+                    "attempts": db.execute("SELECT COUNT(*) n FROM attempts").fetchone()["n"],
+                }
+            me = user_json(user)
+            if me:
+                link = db.execute("SELECT phone FROM telegram_links WHERE account_id=?", (str(user["id"]),)).fetchone()
+                me["tg"] = link["phone"] if link else ""
+        self.send_json({"ok": True, "me": me, "tests": tests, "drafts": owned, "attempts": attempts, "maintenance": maintenance, "admin": admin, "version": EVENT_ID})
 
-def port_busy(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+    def api_events(self):
+        try:
+            last = int(self.headers.get("Last-Event-ID") or 0)
+        except ValueError:
+            last = 0
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            self.wfile.write(b"retry: 2500\n\n")
+            self.wfile.flush()
+            started = time.time()
+            while time.time() - started < 55:
+                with EVENT_COND:
+                    EVENT_COND.wait_for(lambda: EVENT_ID > last, timeout=12)
+                    pending = [event for event in EVENTS if event[0] > last]
+                if pending:
+                    for event_id, kind, payload in pending:
+                        self.wfile.write(f"id: {event_id}\nevent: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
+                        last = event_id
+                else:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def api_login(self):
+        data = self.read_json()
+        with db_connect() as db:
+            user = db.execute("SELECT * FROM users WHERE name=? COLLATE NOCASE", (str(data.get("user", "")).strip(),)).fetchone()
+            if not user or not verify_password(str(data.get("password", "")), user["password_hash"]):
+                self.send_json({"ok": False, "error": "Неверное имя или пароль"}, 401)
+                return
+            token = create_session(db, user["id"])
+        cookie = f"idris_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"
+        if APP_URL.startswith("https://"):
+            cookie += "; Secure"
+        self.send_json({"ok": True, "user": user_json(user)}, extra={"Set-Cookie": cookie})
+
+    def api_register(self):
+        data = self.read_json()
+        name = str(data.get("name", "")).strip()[:120]
+        password = str(data.get("password", ""))
+        role = str(data.get("role", "student"))
+        group = str(data.get("group", "")).strip()[:50]
+        sid = str(data.get("employee_id", "")).strip().upper()[:40]
+        if role not in ("student", "staff") or len(name) < 3 or len(password) < 6 or (role == "student" and not group):
+            self.send_json({"ok": False, "error": "Проверьте поля; пароль от 6 символов"}, 400)
+            return
+        with db_connect() as db:
+            if db.execute("SELECT 1 FROM users WHERE name=? COLLATE NOCASE", (name,)).fetchone():
+                self.send_json({"ok": False, "error": "Такой пользователь уже существует"}, 409)
+                return
+            if role == "staff" and not db.execute("SELECT 1 FROM employee_ids WHERE code=? COLLATE NOCASE AND active=1 AND used_by IS NULL", (sid,)).fetchone():
+                self.send_json({"ok": False, "error": "ID сотрудника не найден или уже использован"}, 403)
+                return
+            now = int(time.time())
+            cur = db.execute("INSERT INTO users(name,password_hash,role,group_name,employee_id,initials,title,created_at) VALUES(?,?,?,?,?,?,?,?)", (name, hash_password(password), role, group if role == "student" else "", sid if role == "staff" else None, make_initials(name), "Студент" if role == "student" else "Сотрудник IDRIS", now))
+            user_id = cur.lastrowid
+            if role == "staff":
+                db.execute("UPDATE employee_ids SET used_by=? WHERE code=? COLLATE NOCASE", (user_id, sid))
+            user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            token = create_session(db, user_id)
+        emit_event("accounts")
+        cookie = f"idris_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"
+        if APP_URL.startswith("https://"):
+            cookie += "; Secure"
+        self.send_json({"ok": True, "user": user_json(user)}, 201, {"Set-Cookie": cookie})
+
+    def api_logout(self):
+        token = self.cookie_token()
+        if token:
+            with db_connect() as db:
+                db.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
+        self.send_json({"ok": True}, extra={"Set-Cookie": "idris_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"})
+
+    def api_save_test(self):
+        data = self.read_json()
+        with db_connect() as db:
+            user = self.require_user(db, {"staff", "dev"})
+            if not user:
+                return
+            test_id = str(data.get("id") or secrets.token_urlsafe(9))[:40]
+            existing = fetch_test(db, test_id)
+            if existing and user["role"] != "dev" and existing["author_id"] != user["id"]:
+                self.send_json({"ok": False}, 403)
+                return
+            blocks = data.get("blocks") if isinstance(data.get("blocks"), list) else []
+            points = sum(max(0, int(block.get("pts") or 0)) for block in blocks)
+            content = json.dumps({"blocks": blocks, "scale": data.get("scale")}, ensure_ascii=False)
+            now = int(time.time())
+            if existing:
+                db.execute("UPDATE tests SET title=?,description=?,content_json=?,points=?,question_count=?,updated_at=? WHERE id=?", (str(data.get("title") or "Без названия")[:180], str(data.get("desc") or "")[:1000], content, points, len(blocks), now, test_id))
+            else:
+                db.execute("INSERT INTO tests(id,author_id,title,description,content_json,points,question_count,access_mode,access_hash,qr_code,published,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (test_id, user["id"], str(data.get("title") or "Без названия")[:180], str(data.get("desc") or "")[:1000], content, points, len(blocks), "open", "", secrets.token_hex(4).upper(), 1, now, now))
+            payload = serialize_test(db, fetch_test(db, test_id), True)
+        emit_event("tests", {"id": test_id})
+        self.send_json({"ok": True, "test": payload})
+
+    def api_test_access(self, test_id):
+        data = self.read_json()
+        mode = str(data.get("mode", "open"))
+        if mode not in ("open", "pass", "qr"):
+            mode = "open"
+        with db_connect() as db:
+            user = self.require_user(db, {"staff", "dev"})
+            if not user:
+                return
+            row = fetch_test(db, test_id)
+            if not row or (user["role"] != "dev" and row["author_id"] != user["id"]):
+                self.send_json({"ok": False}, 403)
+                return
+            encoded = row["access_hash"]
+            if mode == "pass" and str(data.get("password", "")):
+                encoded = hash_password(str(data["password"]))
+            db.execute("UPDATE tests SET access_mode=?,access_hash=?,updated_at=? WHERE id=?", (mode, encoded, int(time.time()), test_id))
+            payload = serialize_test(db, fetch_test(db, test_id), True)
+        emit_event("tests", {"id": test_id})
+        self.send_json({"ok": True, "test": payload})
+
+    def api_test_open(self, test_id):
+        data = self.read_json()
+        with db_connect() as db:
+            row = fetch_test(db, test_id)
+            if not row or not row["published"]:
+                self.send_json({"ok": False, "error": "Тест не найден"}, 404)
+                return
+            credential = str(data.get("credential", ""))
+            if row["access_mode"] == "pass" and not verify_password(credential, row["access_hash"]):
+                self.send_json({"ok": False, "error": "Неверный пароль"}, 403)
+                return
+            if row["access_mode"] == "qr" and not hmac.compare_digest(credential.upper(), row["qr_code"].upper()):
+                self.send_json({"ok": False, "error": "Неверный QR-код"}, 403)
+                return
+            token = secrets.token_urlsafe(30)
+            now = int(time.time())
+            db.execute("INSERT INTO quiz_sessions(token_hash,test_id,created_at,expires_at) VALUES(?,?,?,?)", (hashlib.sha256(token.encode()).hexdigest(), test_id, now, now + QUIZ_TTL))
+            content = test_content(row)
+        self.send_json({"ok": True, "token": token, "blocks": public_blocks(content.get("blocks", []))})
+
+    def api_test_submit(self, test_id):
+        data = self.read_json()
+        token_hash = hashlib.sha256(str(data.get("token", "")).encode()).hexdigest()
+        with db_connect() as db:
+            quiz = db.execute("SELECT * FROM quiz_sessions WHERE token_hash=? AND test_id=? AND expires_at>?", (token_hash, test_id, int(time.time()))).fetchone()
+            row = fetch_test(db, test_id)
+            if not quiz or not row:
+                self.send_json({"ok": False, "error": "Сессия теста истекла"}, 403)
+                return
+            user = self.current_user(db)
+            student_name = str(data.get("student_name") or (user["name"] if user else "")).strip()[:120]
+            group = str(data.get("group") or (user["group_name"] if user else "")).strip()[:50]
+            if not student_name or not group:
+                self.send_json({"ok": False, "error": "Укажите имя и группу"}, 400)
+                return
+            content = test_content(row)
+            answers = data.get("answers") or {}
+            for index, block in enumerate(content.get("blocks", [])):
+                if not block.get("req"):
+                    continue
+                answer = answers.get(str(block.get("id")), answers.get(block.get("id")))
+                missing = not str(answer or "").strip() if block.get("type") == "text" else not answer
+                if missing:
+                    self.send_json({"ok": False, "error": f"Обязательный вопрос № {index + 1} не отвечен", "question": index + 1}, 400)
+                    return
+            score, total, percent, grade, review = calculate_result(content, answers)
+            now = int(time.time())
+            db.execute("INSERT INTO attempts(test_id,user_id,student_name,group_name,score,total,grade,percent,review_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (test_id, user["id"] if user else None, student_name, group, score, total, grade, percent, json.dumps(review, ensure_ascii=False), now))
+            db.execute("DELETE FROM quiz_sessions WHERE token_hash=?", (token_hash,))
+        emit_event("attempts", {"test_id": test_id})
+        text = f"Новое прохождение теста\n\nТест: {row['title']}\nСтудент: {student_name}\nГруппа: {group}\nРезультат: {score} из {total}\nОценка: {grade}"
+        threading.Thread(target=notify_author, args=(row["author_id"], text), daemon=True).start()
+        self.send_json({"ok": True, "score": score, "total": total, "percent": percent, "grade": grade, "review": review})
+
+    def api_maintenance(self):
+        data = self.read_json()
+        with db_connect() as db:
+            user = self.require_user(db, {"dev"})
+            if not user:
+                return
+            value = {"on": bool(data.get("on")), "text": str(data.get("text") or "Ведутся технические работы.")[:500]}
+            db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('maintenance',?)", (json.dumps(value, ensure_ascii=False),))
+        emit_event("maintenance")
+        self.send_json({"ok": True, "maintenance": value})
+
+    def api_admin_wipe(self):
+        with db_connect() as db:
+            user = self.require_user(db, {"dev"})
+            if not user:
+                return
+            db.execute("DELETE FROM tests")
+            db.execute("DELETE FROM sessions WHERE user_id<>?", (user["id"],))
+            db.execute("DELETE FROM employee_ids")
+            db.execute("DELETE FROM users WHERE role<>'dev'")
+            db.execute("INSERT OR IGNORE INTO employee_ids(code) VALUES('IDR-1001')")
+        emit_event("sync")
+        self.send_json({"ok": True})
+
+    def api_employee_id(self):
+        data = self.read_json()
+        code = str(data.get("code", "")).strip().upper()
+        if not re.fullmatch(r"IDR-[A-Z0-9]{4,12}", code):
+            self.send_json({"ok": False, "error": "Формат IDR-XXXX"}, 400)
+            return
+        with db_connect() as db:
+            if not self.require_user(db, {"dev"}):
+                return
+            db.execute("INSERT OR IGNORE INTO employee_ids(code) VALUES(?)", (code,))
+        self.send_json({"ok": True})
+
+    def api_telegram_link(self):
+        data = self.read_json()
+        phone = normalize_phone(data.get("phone"))
+        with db_connect() as db:
+            user = self.require_user(db, {"staff", "dev"})
+            if not user:
+                return
+            if len(phone) < 10:
+                self.send_json({"ok": False, "error": "Некорректный номер"}, 400)
+                return
+            account_id = str(user["id"])
+            code = secrets.token_hex(3).upper()
+            db.execute("DELETE FROM pending_links WHERE account_id=?", (account_id,))
+            db.execute("INSERT INTO pending_links(code,account_id,display_name,phone,status,created_at) VALUES(?,?,?,?,?,?)", (code, account_id, user["name"], phone, "pending", int(time.time())))
+        username = current_bot_username()
+        self.send_json({"ok": True, "code": code, "bot_url": f"https://t.me/{username}?start={code}" if username else "", "expires_in": LINK_TTL})
+
+    def api_telegram_unlink(self):
+        with db_connect() as db:
+            user = self.require_user(db, {"staff", "dev"})
+            if not user:
+                return
+            db.execute("DELETE FROM telegram_links WHERE account_id=?", (str(user["id"]),))
+        self.send_json({"ok": True})
 
 
 def run_web():
     servers = []
-    candidates = [PORT] + [p for p in (3000, 8080) if p != PORT]
-    for p in candidates:
-        if port_busy(p):
-            log.warning("Порт %s уже занят — пропускаю", p)
-            continue
+    for port in dict.fromkeys((PORT, 3000, 8080)):
         try:
-            srv = ThreadingHTTPServer(("0.0.0.0", p), Handler)
-        except OSError as exc:
-            log.warning("Не удалось занять порт %s: %s", p, exc)
+            server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        except OSError:
             continue
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        servers.append(srv)
-        log.info("IDRIS STUDY web запущен на 0.0.0.0:%s", p)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        log.info("IDRIS STUDY web started on 0.0.0.0:%s", port)
     return servers
 
 
 def main():
     init_db()
-
     if BOT_TOKEN and TELEGRAM_MODE == "polling":
         threading.Thread(target=polling_loop, daemon=True).start()
-
     servers = run_web() if RUN_WEB else []
-
     if BOT_TOKEN and TELEGRAM_MODE == "webhook" and servers:
-        threading.Thread(target=lambda: [time.sleep(1), configure_webhook()], daemon=True).start()
-
-    log.info(
-        "Бот запущен (режим=%s, web=%s)",
-        TELEGRAM_MODE,
-        ",".join(str(s.server_address[1]) for s in servers) or "off",
-    )
+        threading.Thread(target=configure_webhook, daemon=True).start()
+    log.info("Service started: mode=%s, ports=%s", TELEGRAM_MODE, [s.server_port for s in servers])
     while True:
         time.sleep(3600)
 
