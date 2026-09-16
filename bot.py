@@ -3,14 +3,15 @@ import logging
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, request, send_from_directory
-from waitress import serve
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,6 +21,8 @@ APP_URL = os.getenv("APP_URL", "https://IdrisStudy.bothost.tech").rstrip("/")
 PORT = int(os.getenv("PORT", "5000"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").lstrip("@").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "polling").strip().lower()  # polling | webhook
+RUN_WEB = os.getenv("RUN_WEB", "1") == "1"
 
 if not WEBHOOK_SECRET and BOT_TOKEN:
     WEBHOOK_SECRET = hashlib.sha256(BOT_TOKEN.encode("utf-8")).hexdigest()[:48]
@@ -27,14 +30,16 @@ if not WEBHOOK_SECRET and BOT_TOKEN:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 LINK_TTL = 20 * 60
 
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 128 * 1024
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("idris-bot")
 
+app = FastAPI(title="IDRIS STUDY", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+# ---------------- storage ----------------
 
 def connect_db():
     db = sqlite3.connect(DB_PATH, timeout=15)
@@ -73,6 +78,8 @@ def init_db():
         )
 
 
+# ---------------- telegram helpers ----------------
+
 def normalize_phone(value):
     digits = re.sub(r"\D", "", str(value or ""))
     if len(digits) == 11 and digits.startswith("8"):
@@ -84,7 +91,7 @@ def telegram(method, payload=None):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not configured")
     response = requests.post(
-        f"{TELEGRAM_API}/{method}", json=payload or {}, timeout=20
+        f"{TELEGRAM_API}/{method}", json=payload or {}, timeout=45
     )
     response.raise_for_status()
     data = response.json()
@@ -112,23 +119,16 @@ def current_bot_username():
 
 
 def configure_webhook():
-    if not BOT_TOKEN:
-        log.warning("BOT_TOKEN is missing. Web server started without Telegram bot.")
-        return
-    try:
-        current_bot_username()
-        telegram(
-            "setWebhook",
-            {
-                "url": f"{APP_URL}/telegram/webhook",
-                "secret_token": WEBHOOK_SECRET,
-                "allowed_updates": ["message"],
-                "drop_pending_updates": False,
-            },
-        )
-        log.info("Telegram webhook configured: %s/telegram/webhook", APP_URL)
-    except Exception:
-        log.exception("Unable to configure Telegram webhook")
+    telegram(
+        "setWebhook",
+        {
+            "url": f"{APP_URL}/telegram/webhook",
+            "secret_token": WEBHOOK_SECRET,
+            "allowed_updates": ["message"],
+            "drop_pending_updates": False,
+        },
+    )
+    log.info("Telegram webhook configured: %s/telegram/webhook", APP_URL)
 
 
 def remove_keyboard():
@@ -276,44 +276,87 @@ def handle_update(update):
     send_message(chat_id, "Доступные команды: /status и /unlink")
 
 
-@app.after_request
-def security_headers(response):
+# ---------------- long polling ----------------
+
+def polling_loop():
+    log.info("Telegram long polling started")
+    try:
+        telegram("deleteWebhook", {"drop_pending_updates": False})
+    except Exception as exc:
+        log.warning("deleteWebhook failed: %s", exc)
+    offset = None
+    while True:
+        try:
+            updates = telegram(
+                "getUpdates",
+                {"timeout": 25, "offset": offset, "allowed_updates": ["message"]},
+            )
+            for upd in updates:
+                offset = upd["update_id"] + 1
+                try:
+                    handle_update(upd)
+                except Exception:
+                    log.exception("Error while handling update")
+        except Exception as exc:
+            msg = str(exc)
+            if "Conflict" in msg:
+                try:
+                    telegram("deleteWebhook", {"drop_pending_updates": False})
+                except Exception:
+                    pass
+            log.warning("Polling error: %s", exc)
+            time.sleep(4)
+
+
+# ---------------- web ----------------
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
     return response
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def index():
-    return send_from_directory(BASE_DIR, "index.html")
+    return FileResponse(BASE_DIR / "index.html")
 
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, bot=bool(BOT_TOKEN), webhook=f"{APP_URL}/telegram/webhook")
+    return {
+        "ok": True,
+        "bot": bool(BOT_TOKEN),
+        "mode": TELEGRAM_MODE,
+        "webhook": f"{APP_URL}/telegram/webhook",
+    }
 
 
 @app.post("/telegram/webhook")
-def webhook():
+async def telegram_webhook(request: Request):
     if WEBHOOK_SECRET:
         provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not secrets.compare_digest(provided, WEBHOOK_SECRET):
-            return jsonify(ok=False), 403
+            return JSONResponse({"ok": False}, status_code=403)
     try:
-        handle_update(request.get_json(silent=True) or {})
+        handle_update(await request.json())
     except Exception:
         log.exception("Error while handling Telegram update")
-    return jsonify(ok=True)
+    return {"ok": True}
 
 
 @app.post("/api/telegram/link")
-def create_link():
-    data = request.get_json(silent=True) or {}
+async def create_link(request: Request):
+    data = await request.json()
     account_id = str(data.get("account_id", "")).strip()[:80]
     display_name = str(data.get("display_name", "")).strip()[:120]
     phone = normalize_phone(data.get("phone"))
     if not account_id or len(phone) < 10:
-        return jsonify(ok=False, error="Укажите аккаунт и корректный номер"), 400
+        return JSONResponse(
+            {"ok": False, "error": "Укажите аккаунт и корректный номер"},
+            status_code=400,
+        )
 
     code = secrets.token_hex(3).upper()
     now = int(time.time())
@@ -330,54 +373,49 @@ def create_link():
 
     username = current_bot_username()
     bot_url = f"https://t.me/{username}?start={code}" if username else ""
-    return jsonify(
-        ok=True,
-        code=code,
-        bot_url=bot_url,
-        expires_in=LINK_TTL,
-    )
+    return {"ok": True, "code": code, "bot_url": bot_url, "expires_in": LINK_TTL}
 
 
 @app.get("/api/telegram/link-status")
-def link_status():
-    code = request.args.get("code", "").strip().upper()
+def link_status(code: str = ""):
+    code = code.strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{6}", code):
-        return jsonify(ok=False, linked=False), 400
+        return JSONResponse({"ok": False, "linked": False}, status_code=400)
     with connect_db() as db:
         row = db.execute(
             "SELECT status, phone FROM pending_links WHERE code = ?", (code,)
         ).fetchone()
-    return jsonify(
-        ok=True,
-        linked=bool(row and row["status"] == "confirmed"),
-        phone=row["phone"] if row and row["status"] == "confirmed" else None,
-    )
+    return {
+        "ok": True,
+        "linked": bool(row and row["status"] == "confirmed"),
+        "phone": row["phone"] if row and row["status"] == "confirmed" else None,
+    }
 
 
 @app.post("/api/telegram/unlink")
-def unlink():
-    data = request.get_json(silent=True) or {}
+async def api_unlink(request: Request):
+    data = await request.json()
     account_id = str(data.get("account_id", "")).strip()[:80]
     if not account_id:
-        return jsonify(ok=False), 400
+        return JSONResponse({"ok": False}, status_code=400)
     with connect_db() as db:
         db.execute("DELETE FROM telegram_links WHERE account_id = ?", (account_id,))
         db.execute("DELETE FROM pending_links WHERE account_id = ?", (account_id,))
-    return jsonify(ok=True)
+    return {"ok": True}
 
 
 @app.post("/api/telegram/notify")
-def notify():
-    data = request.get_json(silent=True) or {}
+async def notify(request: Request):
+    data = await request.json()
     account_id = str(data.get("account_id", "")).strip()[:80]
     if not account_id:
-        return jsonify(ok=False, error="account_id is required"), 400
+        return JSONResponse({"ok": False, "error": "account_id is required"}, status_code=400)
     with connect_db() as db:
         row = db.execute(
             "SELECT chat_id FROM telegram_links WHERE account_id = ?", (account_id,)
         ).fetchone()
     if not row:
-        return jsonify(ok=True, delivered=False)
+        return {"ok": True, "delivered": False}
 
     student = str(data.get("student", "Студент"))[:120]
     group = str(data.get("group", "—"))[:50]
@@ -397,12 +435,58 @@ def notify():
         send_message(row["chat_id"], text)
     except Exception:
         log.exception("Unable to deliver notification")
-        return jsonify(ok=False, delivered=False), 502
-    return jsonify(ok=True, delivered=True)
+        return JSONResponse({"ok": False, "delivered": False}, status_code=502)
+    return {"ok": True, "delivered": True}
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+    if BOT_TOKEN and TELEGRAM_MODE == "webhook":
+        try:
+            configure_webhook()
+        except Exception:
+            log.exception("Unable to configure Telegram webhook")
+
+
+# ---------------- entry ----------------
+
+def port_busy(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def main():
+    init_db()
+
+    if BOT_TOKEN and TELEGRAM_MODE == "polling":
+        threading.Thread(target=polling_loop, daemon=True).start()
+
+    if not RUN_WEB:
+        log.info("WEB disabled — running bot only (mode=%s)", TELEGRAM_MODE)
+        while True:
+            time.sleep(3600)
+
+    import uvicorn
+
+    if port_busy(PORT):
+        log.warning(
+            "Порт %s уже занят веб-сервером хостинга — свой веб-сервер не поднимаю. "
+            "Бот продолжает работать (режим %s).",
+            PORT, TELEGRAM_MODE,
+        )
+        while True:
+            time.sleep(3600)
+
+    log.info("Starting IDRIS STUDY web on 0.0.0.0:%s", PORT)
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    except OSError as exc:
+        log.warning("Не удалось занять порт %s: %s. Бот продолжает работать.", PORT, exc)
+        while True:
+            time.sleep(3600)
 
 
 if __name__ == "__main__":
-    init_db()
-    threading.Thread(target=configure_webhook, daemon=True).start()
-    log.info("Starting IDRIS STUDY on 0.0.0.0:%s", PORT)
-    serve(app, host="0.0.0.0", port=PORT, threads=8)
+    main()
