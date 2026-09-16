@@ -488,21 +488,21 @@ def port_busy(port):
 
 
 def run_web():
-    if port_busy(PORT):
-        log.warning(
-            "Порт %s уже занят веб-сервером хостинга — свой сервер не поднимаю,"
-            " бот продолжает работать", PORT
-        )
-        return None
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    log.info("IDRIS STUDY web запущен на 0.0.0.0:%s", PORT)
-    try:
-        t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5})
-    except TypeError:
-        t = threading.Thread(target=server.serve_forever)
-    t.daemon = True
-    t.start()
-    return server
+    servers = []
+    candidates = [PORT] + [p for p in (3000, 8080) if p != PORT]
+    for p in candidates:
+        if port_busy(p):
+            log.warning("Порт %s уже занят — пропускаю", p)
+            continue
+        try:
+            srv = ThreadingHTTPServer(("0.0.0.0", p), Handler)
+        except OSError as exc:
+            log.warning("Не удалось занять порт %s: %s", p, exc)
+            continue
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        servers.append(srv)
+        log.info("IDRIS STUDY web запущен на 0.0.0.0:%s", p)
+    return servers
 
 
 def main():
@@ -511,14 +511,16 @@ def main():
     if BOT_TOKEN and TELEGRAM_MODE == "polling":
         threading.Thread(target=polling_loop, daemon=True).start()
 
-    server = None
-    if RUN_WEB:
-        server = run_web()
+    servers = run_web() if RUN_WEB else []
 
-    if BOT_TOKEN and TELEGRAM_MODE == "webhook" and server:
+    if BOT_TOKEN and TELEGRAM_MODE == "webhook" and servers:
         threading.Thread(target=lambda: [time.sleep(1), configure_webhook()], daemon=True).start()
 
-    log.info("Бот запущен (режим=%s, web=%s)", TELEGRAM_MODE, "on" if server else "off")
+    log.info(
+        "Бот запущен (режим=%s, web=%s)",
+        TELEGRAM_MODE,
+        ",".join(str(s.server_address[1]) for s in servers) or "off",
+    )
     while True:
         time.sleep(3600)
 
