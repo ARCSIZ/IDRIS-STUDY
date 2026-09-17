@@ -208,9 +208,12 @@ def table_exists(db, name):
     ).fetchone() is not None
 
 
-def full_fk_rebuild(db):
-    """Восстанавливает схему после старых RENAME-миграций:
-    ссылки FK пересоздаются на корректную таблицу, данные переносятся."""
+def full_fk_rebuild(_ignored=None):
+    """Восстанавливает схему после старых RENAME-миграций.
+    Работает на отдельном соединении: PRAGMA foreign_keys не действует внутри транзакции."""
+    db = sqlite3.connect(DB_PATH, timeout=30)
+    db.row_factory = sqlite3.Row
+    db.isolation_level = None          # автокоммит, чтобы PRAGMA применилась
     db.execute("PRAGMA foreign_keys=OFF")
     preserved = {}
     for table in ("users", "users_old", "tests", "attempts", "employee_ids",
@@ -261,12 +264,30 @@ def full_fk_rebuild(db):
                    (r["id"], r.get("user_id"), r["title"], r.get("body", ""),
                     r.get("kind", "info"), r.get("created_at", 0)))
     db.execute("PRAGMA foreign_keys=ON")
+    db.close()
     log.warning("Database schema rebuilt: foreign keys repaired, data preserved")
+
+
+def schema_is_broken(db):
+    """Старые миграции могли оставить ссылки FK на удалённую users_old."""
+    row = db.execute("SELECT sql FROM sqlite_master WHERE name='users'").fetchone()
+    users_sql = row["sql"] if row and row["sql"] else ""
+    for dep in ("sessions", "employee_ids", "tests", "attempts", "notifications", "notification_reads"):
+        s = db.execute("SELECT sql FROM sqlite_master WHERE name=?", (dep,)).fetchone()
+        if s and s["sql"] and "users_old" in s["sql"]:
+            return True
+    return (
+        table_exists(db, "users_old")
+        or "'teacher'" not in users_sql
+        or "employee_id TEXT UNIQUE" in users_sql
+    )
 
 
 def init_db():
     with db_connect() as db:
         db.execute("PRAGMA journal_mode=WAL")
+        # Актуальная схема применяется первой; блок ниже остаётся для старых баз.
+        db.executescript(SCHEMA)
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -387,16 +408,11 @@ def init_db():
             if column not in columns:
                 db.execute(ddl)
 
-        # Проверяем, не сломаны ли ссылки FK старой RENAME-миграцией.
-        users_schema = db.execute("SELECT sql FROM sqlite_master WHERE name='users'").fetchone()
-        users_sql = users_schema["sql"] if users_schema and users_schema["sql"] else ""
-        broken_refs = False
-        for dep in ("sessions", "employee_ids", "tests", "attempts", "notifications", "notification_reads"):
-            s = db.execute("SELECT sql FROM sqlite_master WHERE name=?", (dep,)).fetchone()
-            if s and s["sql"] and "users_old" in s["sql"]:
-                broken_refs = True
-        if broken_refs or table_exists(db, "users_old") or "'teacher'" not in users_sql or "employee_id TEXT UNIQUE" in users_sql:
-            full_fk_rebuild(db)
+        db.commit()
+        needs_rebuild = schema_is_broken(db)
+    if needs_rebuild:
+        full_fk_rebuild()
+    with db_connect() as db:
 
         dev_name = os.getenv("DEV_NAME", "Самир Гамидов").strip()
         dev_password = os.getenv("DEV_PASSWORD", "Fakiza2015")
@@ -744,6 +760,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("%s %s", self.address_string(), fmt % args)
 
+    def handle_one_request(self):
+        # Соединение переиспользуется, поэтому флаг ответа сбрасываем на каждый запрос.
+        self._replied = False
+        super().handle_one_request()
+
     def headers_out(self, status, content_type, length=None, extra=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -757,9 +778,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def send_json(self, payload, status=200, extra=None):
+        # Защита от повторной отправки заголовков после ошибки в обработчике.
+        if getattr(self, "_replied", False):
+            return
+        self._replied = True
         body = json.dumps(payload, ensure_ascii=False).encode()
-        self.headers_out(status, "application/json; charset=utf-8", len(body), extra)
-        self.wfile.write(body)
+        try:
+            self.headers_out(status, "application/json; charset=utf-8", len(body), extra)
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def read_json(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -985,28 +1013,33 @@ class Handler(BaseHTTPRequestHandler):
             last = int(self.headers.get("Last-Event-ID") or 0)
         except ValueError:
             last = 0
+        # Поток событий должен закрывать соединение сам: без Content-Length
+        # keep-alive ломает разбор ответа и браузер буферизует данные.
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         try:
-            self.wfile.write(b"retry: 2500\n\n")
+            self.wfile.write(b"retry: 2000\n: connected\n\n")
             self.wfile.flush()
             started = time.time()
-            while time.time() - started < 55:
+            while time.time() - started < 50:
                 with EVENT_COND:
-                    EVENT_COND.wait_for(lambda: EVENT_ID > last, timeout=12)
+                    EVENT_COND.wait_for(lambda: EVENT_ID > last, timeout=10)
                     pending = [event for event in EVENTS if event[0] > last]
                 if pending:
                     for event_id, kind, payload in pending:
-                        self.wfile.write(f"id: {event_id}\nevent: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
+                        self.wfile.write(
+                            f"id: {event_id}\nevent: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+                        )
                         last = event_id
                 else:
                     self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
     def api_login(self):
