@@ -6,8 +6,10 @@ import os
 import re
 import secrets
 import sqlite3
+import struct
 import threading
 import time
+import zlib
 from collections import deque
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -266,6 +268,125 @@ def full_fk_rebuild(_ignored=None):
     db.execute("PRAGMA foreign_keys=ON")
     db.close()
     log.warning("Database schema rebuilt: foreign keys repaired, data preserved")
+
+
+# ---------------- link preview banner ----------------
+
+_FONT = {
+    "A": "01110 10001 10001 11111 10001 10001 10001", "B": "11110 10001 10001 11110 10001 10001 11110",
+    "C": "01110 10001 10000 10000 10000 10001 01110", "D": "11110 10001 10001 10001 10001 10001 11110",
+    "E": "11111 10000 10000 11110 10000 10000 11111", "F": "11111 10000 10000 11110 10000 10000 10000",
+    "G": "01110 10001 10000 10111 10001 10001 01111", "H": "10001 10001 10001 11111 10001 10001 10001",
+    "I": "11111 00100 00100 00100 00100 00100 11111", "J": "00111 00010 00010 00010 00010 10010 01100",
+    "K": "10001 10010 10100 11000 10100 10010 10001", "L": "10000 10000 10000 10000 10000 10000 11111",
+    "M": "10001 11011 10101 10101 10001 10001 10001", "N": "10001 11001 10101 10011 10001 10001 10001",
+    "O": "01110 10001 10001 10001 10001 10001 01110", "P": "11110 10001 10001 11110 10000 10000 10000",
+    "Q": "01110 10001 10001 10001 10101 10010 01101", "R": "11110 10001 10001 11110 10100 10010 10001",
+    "S": "01111 10000 10000 01110 00001 00001 11110", "T": "11111 00100 00100 00100 00100 00100 00100",
+    "U": "10001 10001 10001 10001 10001 10001 01110", "V": "10001 10001 10001 10001 10001 01010 00100",
+    "W": "10001 10001 10001 10101 10101 11011 10001", "X": "10001 10001 01010 00100 01010 10001 10001",
+    "Y": "10001 10001 01010 00100 00100 00100 00100", "Z": "11111 00001 00010 00100 01000 10000 11111",
+    "0": "01110 10001 10011 10101 11001 10001 01110", "1": "00100 01100 00100 00100 00100 00100 01110",
+    "2": "01110 10001 00001 00010 00100 01000 11111", "3": "11111 00010 00100 00010 00001 10001 01110",
+    "4": "00010 00110 01010 10010 11111 00010 00010", "5": "11111 10000 11110 00001 00001 10001 01110",
+    "6": "00110 01000 10000 11110 10001 10001 01110", "7": "11111 00001 00010 00100 01000 01000 01000",
+    "8": "01110 10001 10001 01110 10001 10001 01110", "9": "01110 10001 10001 01111 00001 00010 01100",
+    "-": "00000 00000 00000 11111 00000 00000 00000", ".": "00000 00000 00000 00000 00000 01100 01100",
+    "/": "00001 00010 00010 00100 01000 01000 10000", ":": "00000 01100 01100 00000 01100 01100 00000",
+    " ": "00000 00000 00000 00000 00000 00000 00000",
+}
+
+
+def _draw_text(rows, text, x, y, scale, color, width, height):
+    cursor = x
+    for char in text.upper():
+        glyph = _FONT.get(char)
+        if glyph is None:
+            cursor += 6 * scale
+            continue
+        for gy, line in enumerate(glyph.split()):
+            for gx, bit in enumerate(line):
+                if bit != "1":
+                    continue
+                for sy in range(scale):
+                    py = y + gy * scale + sy
+                    if not (0 <= py < height):
+                        continue
+                    row = rows[py]
+                    for sx in range(scale):
+                        px = cursor + gx * scale + sx
+                        if 0 <= px < width:
+                            row[px * 3:px * 3 + 3] = color
+        cursor += 6 * scale
+    return cursor
+
+
+def _text_width(text, scale):
+    return len(text) * 6 * scale
+
+
+def render_banner():
+    """Баннер 1200x630 для превью ссылок: PNG собирается вручную, без зависимостей."""
+    width, height = 1200, 630
+    rows = []
+    for y in range(height):
+        t = y / height
+        row = bytearray()
+        for x in range(width):
+            u = x / width
+            mix = (t * 0.68) + (u * 0.32)
+            r = int(20 + 26 * (1 - mix))
+            g = int(96 + 74 * (1 - mix))
+            b = int(80 + 58 * (1 - mix))
+            row += bytes((max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))))
+        rows.append(row)
+
+    white = bytes((255, 255, 255))
+    mint = bytes((150, 232, 208))
+    soft = bytes((198, 228, 220))
+
+    title, sub, host = "IDRIS STUDY", "ONLINE TESTING PLATFORM", "IDRISSTUDY.BOTHOST.TECH"
+    ts, ss, hs = 13, 4, 3
+    _draw_text(rows, title, (width - _text_width(title, ts)) // 2, 214, ts, white, width, height)
+    _draw_text(rows, sub, (width - _text_width(sub, ss)) // 2, 350, ss, mint, width, height)
+    _draw_text(rows, host, (width - _text_width(host, hs)) // 2, 470, hs, soft, width, height)
+
+    # акцентная линия под заголовком
+    for y in range(322, 328):
+        for x in range((width - 420) // 2, (width + 420) // 2):
+            rows[y][x * 3:x * 3 + 3] = mint
+
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+
+    def chunk(tag, data):
+        head = struct.pack(">I", len(data)) + tag + data
+        return head + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 6))
+        + chunk(b"IEND", b"")
+    )
+
+
+_BANNER_CACHE = {}
+
+
+def banner_bytes():
+    custom = BASE_DIR / "baner.png"
+    if custom.exists():
+        return custom.read_bytes()
+    stored = DATA_DIR / "baner.png"
+    if stored.exists():
+        return stored.read_bytes()
+    if "data" not in _BANNER_CACHE:
+        _BANNER_CACHE["data"] = render_banner()
+        try:
+            stored.write_bytes(_BANNER_CACHE["data"])
+        except OSError:
+            pass
+    return _BANNER_CACHE["data"]
 
 
 def schema_is_broken(db):
@@ -825,6 +946,21 @@ class Handler(BaseHTTPRequestHandler):
     def route(self):
         return urlparse(self.path).path
 
+    def serve_banner(self):
+        if getattr(self, "_replied", False):
+            return
+        self._replied = True
+        try:
+            body = banner_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def serve_file(self, filename, head=False):
         path = BASE_DIR / filename
         if not path.exists():
@@ -851,6 +987,8 @@ class Handler(BaseHTTPRequestHandler):
             path = self.route()
             if path in ("/", "/index.html"):
                 self.serve_index()
+            elif path in ("/baner.png", "/banner.png", "/og.png"):
+                self.serve_banner()
             elif path in ("/terms", "/terms.html", "/terms/"):
                 self.serve_file("terms.html")
             elif path == "/health":
