@@ -32,6 +32,8 @@ SESSION_TTL = 30 * 24 * 60 * 60
 QUIZ_TTL = 4 * 60 * 60
 LINK_TTL = 20 * 60
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Преподаватели обладают теми же правами, что и сотрудники IDRIS.
+AUTHOR_ROLES = {"teacher", "staff", "dev"}
 
 if not WEBHOOK_SECRET and BOT_TOKEN:
     WEBHOOK_SECRET = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:48]
@@ -203,10 +205,44 @@ def init_db():
             ("sessions", "user_agent", "ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''"),
             ("users", "must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"),
             ("users", "accepted_terms", "ALTER TABLE users ADD COLUMN accepted_terms INTEGER NOT NULL DEFAULT 0"),
+            ("users", "subject", "ALTER TABLE users ADD COLUMN subject TEXT NOT NULL DEFAULT ''"),
         ):
             columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
             if column not in columns:
                 db.execute(ddl)
+
+        # Миграция: роль «teacher» и снятие UNIQUE с employee_id (пустые значения ломали регистрацию).
+        schema = db.execute("SELECT sql FROM sqlite_master WHERE name='users'").fetchone()
+        if schema and ("'teacher'" not in schema["sql"] or "employee_id TEXT UNIQUE" in schema["sql"]):
+            db.execute("ALTER TABLE users RENAME TO users_old")
+            db.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('student','teacher','staff','dev')),
+                    group_name TEXT NOT NULL DEFAULT '',
+                    employee_id TEXT COLLATE NOCASE,
+                    initials TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    must_change_password INTEGER NOT NULL DEFAULT 0,
+                    accepted_terms INTEGER NOT NULL DEFAULT 0,
+                    subject TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            old_columns = {row["name"] for row in db.execute("PRAGMA table_info(users_old)")}
+            shared = [c for c in (
+                "id", "name", "password_hash", "role", "group_name", "employee_id",
+                "initials", "title", "created_at", "must_change_password", "accepted_terms", "subject",
+            ) if c in old_columns]
+            db.execute(f"INSERT INTO users({','.join(shared)}) SELECT {','.join(shared)} FROM users_old")
+            db.execute("UPDATE users SET employee_id=NULL WHERE employee_id=''")
+            db.execute("DROP TABLE users_old")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id) WHERE employee_id IS NOT NULL")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id) WHERE employee_id IS NOT NULL")
 
         dev_name = os.getenv("DEV_NAME", "Самир Гамидов").strip()
         dev_password = os.getenv("DEV_PASSWORD", "Fakiza2015")
@@ -254,6 +290,7 @@ def user_json(row):
         "id": row["id"], "user": row["name"], "role": row["role"],
         "group": row["group_name"], "sid": row["employee_id"] or "",
         "short": row["initials"], "title": row["title"],
+        "subject": row["subject"] if "subject" in keys else "",
         "mustChange": bool(row["must_change_password"]) if "must_change_password" in keys else False,
     }
 
@@ -708,7 +745,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"detail": "Not Found"}, 404)
                 return
             with db_connect() as db:
-                user = self.require_user(db, {"staff", "dev"})
+                user = self.require_user(db, AUTHOR_ROLES)
                 if not user:
                     return
                 row = fetch_test(db, match.group(1))
@@ -727,7 +764,7 @@ class Handler(BaseHTTPRequestHandler):
             user = self.current_user(db)
             tests = [serialize_test(db, r) for r in db.execute("SELECT t.*,u.name author_name FROM tests t JOIN users u ON u.id=t.author_id WHERE published=1 ORDER BY updated_at DESC").fetchall()]
             owned, attempts = [], []
-            if user and user["role"] in ("staff", "dev"):
+            if user and user["role"] in AUTHOR_ROLES:
                 sql = "SELECT t.*,u.name author_name FROM tests t JOIN users u ON u.id=t.author_id"
                 params = ()
                 if user["role"] != "dev":
@@ -776,7 +813,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "id": row["id"], "user": row["name"], "role": row["role"],
                         "group": row["group_name"], "sid": row["employee_id"] or "",
-                        "short": row["initials"], "title": row["title"],
+                        "subject": row["subject"], "short": row["initials"], "title": row["title"],
                         "mustChange": bool(row["must_change_password"]),
                         "created": time.strftime("%d.%m.%Y", time.localtime(row["created_at"])),
                     }
@@ -837,9 +874,16 @@ class Handler(BaseHTTPRequestHandler):
         password = str(data.get("password", ""))
         role = str(data.get("role", "student"))
         group = str(data.get("group", "")).strip()[:50]
+        subject = str(data.get("subject", "")).strip()[:80]
         sid = str(data.get("employee_id", "")).strip().upper()[:40]
-        if role not in ("student", "staff") or len(name) < 3 or len(password) < 6 or (role == "student" and not group):
+        if role not in ("student", "teacher", "staff") or len(name) < 3 or len(password) < 6:
             self.send_json({"ok": False, "error": "Проверьте поля; пароль от 6 символов"}, 400)
+            return
+        if role == "student" and not group:
+            self.send_json({"ok": False, "error": "Укажите номер группы"}, 400)
+            return
+        if role == "teacher" and not subject:
+            self.send_json({"ok": False, "error": "Укажите предмет, который вы ведёте"}, 400)
             return
         if not data.get("accept_terms"):
             self.send_json({"ok": False, "error": "Примите пользовательское соглашение"}, 400)
@@ -852,7 +896,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "ID сотрудника не найден или уже использован"}, 403)
                 return
             now = int(time.time())
-            cur = db.execute("INSERT INTO users(name,password_hash,role,group_name,employee_id,initials,title,created_at) VALUES(?,?,?,?,?,?,?,?)", (name, hash_password(password), role, group if role == "student" else "", sid if role == "staff" else None, make_initials(name), "Студент" if role == "student" else "Сотрудник IDRIS", now))
+            titles = {"student": "Студент", "teacher": "Преподаватель", "staff": "Сотрудник IDRIS"}
+            employee_id = sid if (role == "staff" and sid) else None
+            if employee_id and db.execute(
+                "SELECT 1 FROM users WHERE employee_id=? COLLATE NOCASE", (employee_id,)
+            ).fetchone():
+                self.send_json({"ok": False, "error": "Этот ID сотрудника уже привязан к аккаунту"}, 409)
+                return
+            try:
+                cur = db.execute(
+                    "INSERT INTO users(name,password_hash,role,group_name,subject,employee_id,initials,title,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (name, hash_password(password), role, group if role == "student" else "",
+                     subject if role == "teacher" else "", employee_id, make_initials(name), titles[role], now),
+                )
+            except sqlite3.IntegrityError:
+                self.send_json({"ok": False, "error": "Такой пользователь или ID уже существует"}, 409)
+                return
             user_id = cur.lastrowid
             if role == "staff":
                 db.execute("UPDATE employee_ids SET used_by=? WHERE code=? COLLATE NOCASE", (user_id, sid))
@@ -877,7 +937,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_save_test(self):
         data = self.read_json()
         with db_connect() as db:
-            user = self.require_user(db, {"staff", "dev"})
+            user = self.require_user(db, AUTHOR_ROLES)
             if not user:
                 return
             test_id = str(data.get("id") or secrets.token_urlsafe(9))[:40]
@@ -903,7 +963,7 @@ class Handler(BaseHTTPRequestHandler):
         if mode not in ("open", "pass", "qr"):
             mode = "open"
         with db_connect() as db:
-            user = self.require_user(db, {"staff", "dev"})
+            user = self.require_user(db, AUTHOR_ROLES)
             if not user:
                 return
             row = fetch_test(db, test_id)
@@ -1027,10 +1087,10 @@ class Handler(BaseHTTPRequestHandler):
             if not admin:
                 return
             target_id = int(data.get("user_id") or 0)
-            if role not in ("student", "staff", "dev") or target_id == admin["id"]:
+            if role not in ("student", "teacher", "staff", "dev") or target_id == admin["id"]:
                 self.send_json({"ok": False, "error": "Некорректная роль"}, 400)
                 return
-            title = {"student": "Студент", "staff": "Сотрудник IDRIS", "dev": "Разработчик"}[role]
+            title = {"student": "Студент", "teacher": "Преподаватель", "staff": "Сотрудник IDRIS", "dev": "Разработчик"}[role]
             db.execute("UPDATE users SET role=?,title=? WHERE id=?", (role, title, target_id))
             push_notification(db, target_id, "Роль изменена", f"Администратор назначил вам роль «{title}».", "info")
         emit_event("accounts")
@@ -1167,7 +1227,7 @@ class Handler(BaseHTTPRequestHandler):
         data = self.read_json()
         phone = normalize_phone(data.get("phone"))
         with db_connect() as db:
-            user = self.require_user(db, {"staff", "dev"})
+            user = self.require_user(db, AUTHOR_ROLES)
             if not user:
                 return
             if len(phone) < 10:
@@ -1182,7 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_telegram_unlink(self):
         with db_connect() as db:
-            user = self.require_user(db, {"staff", "dev"})
+            user = self.require_user(db, AUTHOR_ROLES)
             if not user:
                 return
             db.execute("DELETE FROM telegram_links WHERE account_id=?", (str(user["id"]),))

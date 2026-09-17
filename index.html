@@ -1768,7 +1768,7 @@ html.role-dev .cat-btn[data-pane="padmin"],
 html.role-dev .cat-btn[data-pane="ptests"],
 html.role-student .cat-btn[data-pane="ptests"] { display: flex; }
 .tg-row { display: none !important; }
-html.role-staff .tg-row, html.role-dev .tg-row { display: flex !important; }
+html.role-staff .tg-row, html.role-teacher .tg-row, html.role-dev .tg-row { display: flex !important; }
 
 /* telegram dialog */
 .tg-steps { margin: 12px 0; }
@@ -2319,10 +2319,12 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       <div class="login-sub">Выберите роль — от неё зависят доступные разделы</div>
       <div class="role-pick" id="rolePick">
         <button class="role on" data-role="student"><i data-lucide="graduation-cap"></i><b>Студент</b><span>Прохождение тестов</span></button>
-        <button class="role" data-role="staff"><i data-lucide="briefcase"></i><b>Сотрудник IDRIS</b><span>Создание тестов</span></button>
+        <button class="role" data-role="teacher"><i data-lucide="presentation"></i><b>Преподаватель</b><span>Создание тестов</span></button>
+        <button class="role" data-role="staff"><i data-lucide="briefcase"></i><b>Сотрудник IDRIS</b><span>По ID сотрудника</span></button>
       </div>
       <label class="login-f"><span>Имя и фамилия</span><input id="regName" placeholder="Иван Петров"></label>
       <label class="login-f" id="regGroupF"><span>Номер группы</span><input id="regGroup" placeholder="СД-25-0"></label>
+      <label class="login-f" id="regSubjF" style="display:none"><span>Предмет</span><input id="regSubject" placeholder="Например, Анатомия"></label>
       <label class="login-f" id="regIdF" style="display:none"><span>ID сотрудника</span><input id="regId" placeholder="IDR-0000"></label>
       <label class="login-f"><span>Пароль</span><input id="regPass" type="password" placeholder="Минимум 4 символа"></label>
       <label class="agree"><input type="checkbox" id="regAgree">
@@ -3553,7 +3555,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   function clearRole() {
     authed = false;
     currentUser = null;
-    root.classList.remove('role-student', 'role-staff', 'role-dev');
+    root.classList.remove('role-student', 'role-teacher', 'role-staff', 'role-dev');
   }
 
   async function syncServer({ quiet = true } = {}) {
@@ -3612,13 +3614,14 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     r.classList.add('on');
     regRole = r.dataset.role;
     document.getElementById('regGroupF').style.display = regRole === 'student' ? '' : 'none';
+    document.getElementById('regSubjF').style.display = regRole === 'teacher' ? '' : 'none';
     document.getElementById('regIdF').style.display = regRole === 'staff' ? '' : 'none';
   }));
 
   function applyRole(acc) {
     currentUser = acc;
     authed = true;
-    root.classList.remove('role-student', 'role-staff', 'role-dev');
+    root.classList.remove('role-student', 'role-teacher', 'role-staff', 'role-dev');
     root.classList.add('role-' + acc.role);
     renderMyTests();
     renderAdmin();
@@ -3630,8 +3633,9 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     document.querySelector('.pcard-name').textContent = acc.user;
     const badge = acc.role === 'dev' ? '<span class="dev-badge">dev</span>' : '';
     document.querySelector('.prof-role').innerHTML = acc.title + badge;
-    document.querySelector('.pcard-role').innerHTML = acc.title +
-      (acc.group ? ' · группа ' + esc(acc.group) : ' · IDRIS STUDY') + badge;
+    const detail = acc.group ? ' · группа ' + esc(acc.group)
+      : acc.subject ? ' · ' + esc(acc.subject) : ' · IDRIS STUDY';
+    document.querySelector('.pcard-role').innerHTML = acc.title + detail + badge;
   }
 
   document.getElementById('loginGo').addEventListener('click', async () => {
@@ -3658,9 +3662,12 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     const name = document.getElementById('regName').value.trim();
     const pass = document.getElementById('regPass').value;
     const group = document.getElementById('regGroup').value.trim();
+    const subject = document.getElementById('regSubject').value.trim();
     const err = document.getElementById('regErr');
-    if (!name || pass.length < 6 || (regRole === 'student' && !group)) {
-      err.textContent = 'Заполните все поля, пароль от 6 символов';
+    if (!name || pass.length < 6 || (regRole === 'student' && !group) || (regRole === 'teacher' && !subject)) {
+      err.textContent = regRole === 'teacher' && !subject
+        ? 'Укажите предмет, который вы ведёте'
+        : 'Заполните все поля, пароль от 6 символов';
       err.classList.add('show'); return;
     }
     const sid = document.getElementById('regId').value.trim();
@@ -3671,7 +3678,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     try {
       const data = await api('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ name, password: pass, role: regRole, group, employee_id: sid, accept_terms: true })
+        body: JSON.stringify({ name, password: pass, role: regRole, group, subject, employee_id: sid, accept_terms: true })
       });
       err.classList.remove('show');
       applyRole(data.user);
@@ -4295,7 +4302,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   }
 
   /* ================= accounts (dev) ================= */
-  const ROLE_TITLE = { student: 'Студент', staff: 'Сотрудник IDRIS', dev: 'Разработчик' };
+  const ROLE_TITLE = { student: 'Студент', teacher: 'Преподаватель', staff: 'Сотрудник IDRIS', dev: 'Разработчик' };
   function renderUsers() {
     const list = document.getElementById('usrList');
     if (!list) return;
@@ -4305,9 +4312,9 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       <div class="usr-row">
         <span class="st-av">${esc(u.short || '?')}</span>
         <span class="usr-info"><span class="usr-name2">${esc(u.user)}${u.mustChange ? ' <span class="beta-tag">смена пароля</span>' : ''}</span>
-          <span class="usr-meta">${ROLE_TITLE[u.role]}${u.group ? ' · гр. ' + esc(u.group) : ''} · с ${u.created}</span></span>
+          <span class="usr-meta">${ROLE_TITLE[u.role]}${u.group ? ' · гр. ' + esc(u.group) : ''}${u.subject ? ' · ' + esc(u.subject) : ''} · с ${u.created}</span></span>
         <select class="usr-role" data-role-for="${u.id}">
-          ${['student','staff','dev'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_TITLE[r]}</option>`).join('')}
+          ${['student','teacher','staff','dev'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_TITLE[r]}</option>`).join('')}
         </select>
         <button class="mg-btn" data-pwd-for="${u.id}"><i data-lucide="key-round"></i></button>
         <button class="mg-btn danger" data-del-user="${u.id}"><i data-lucide="user-minus"></i></button>
