@@ -179,10 +179,34 @@ def init_db():
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'info',
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS notification_reads (
+                notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                PRIMARY KEY(notification_id, user_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_attempt_test ON attempts(test_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_session_expiry ON sessions(expires_at);
             """
         )
+
+        for table, column, ddl in (
+            ("sessions", "user_agent", "ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''"),
+            ("users", "must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"),
+            ("users", "accepted_terms", "ALTER TABLE users ADD COLUMN accepted_terms INTEGER NOT NULL DEFAULT 0"),
+        ):
+            columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                db.execute(ddl)
 
         dev_name = os.getenv("DEV_NAME", "Самир Гамидов").strip()
         dev_password = os.getenv("DEV_PASSWORD", "Fakiza2015")
@@ -223,21 +247,63 @@ def make_initials(name):
 
 
 def user_json(row):
-    return None if not row else {
+    if not row:
+        return None
+    keys = row.keys()
+    return {
         "id": row["id"], "user": row["name"], "role": row["role"],
         "group": row["group_name"], "sid": row["employee_id"] or "",
         "short": row["initials"], "title": row["title"],
+        "mustChange": bool(row["must_change_password"]) if "must_change_password" in keys else False,
     }
 
 
-def create_session(db, user_id):
+def create_session(db, user_id, user_agent=""):
     token = secrets.token_urlsafe(36)
     now = int(time.time())
     db.execute(
-        "INSERT INTO sessions(token_hash,user_id,created_at,last_seen,expires_at) VALUES(?,?,?,?,?)",
-        (hashlib.sha256(token.encode()).hexdigest(), user_id, now, now, now + SESSION_TTL),
+        "INSERT INTO sessions(token_hash,user_id,created_at,last_seen,expires_at,user_agent) VALUES(?,?,?,?,?,?)",
+        (hashlib.sha256(token.encode()).hexdigest(), user_id, now, now, now + SESSION_TTL, (user_agent or "")[:200]),
     )
     return token
+
+
+def describe_agent(agent):
+    agent = agent or ""
+    device = "Телефон" if any(k in agent for k in ("Android", "iPhone", "iPad", "Mobile")) else "Компьютер"
+    for key, name in (("Edg", "Edge"), ("OPR", "Opera"), ("YaBrowser", "Яндекс"), ("Chrome", "Chrome"), ("Firefox", "Firefox"), ("Safari", "Safari")):
+        if key in agent:
+            return f"{device} · {name}"
+    return device
+
+
+def push_notification(db, user_id, title, body, kind="info"):
+    db.execute(
+        "INSERT INTO notifications(user_id,title,body,kind,created_at) VALUES(?,?,?,?,?)",
+        (user_id, str(title)[:160], str(body)[:600], kind, int(time.time())),
+    )
+
+
+def notifications_for(db, user):
+    if user:
+        rows = db.execute(
+            "SELECT n.*, (r.user_id IS NOT NULL) AS seen FROM notifications n "
+            "LEFT JOIN notification_reads r ON r.notification_id=n.id AND r.user_id=? "
+            "WHERE n.user_id IS NULL OR n.user_id=? ORDER BY n.created_at DESC LIMIT 40",
+            (user["id"], user["id"]),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT *, 0 AS seen FROM notifications WHERE user_id IS NULL ORDER BY created_at DESC LIMIT 40"
+        ).fetchall()
+    return [
+        {
+            "id": row["id"], "title": row["title"], "body": row["body"], "kind": row["kind"],
+            "seen": bool(row["seen"]),
+            "date": time.strftime("%d.%m.%Y %H:%M", time.localtime(row["created_at"])),
+        }
+        for row in rows
+    ]
 
 
 def get_setting(db, key, fallback):
@@ -346,7 +412,10 @@ def calculate_result(content, answers):
         pts = int(block.get("pts") or 0)
         if ok:
             score += pts
-        review.append({"id": block.get("id"), "q": block.get("q", ""), "ok": ok, "yours": yours, "right": right, "pts": pts})
+        review.append({
+            "id": block.get("id"), "q": block.get("q", ""), "ok": ok,
+            "yours": yours, "right": right, "pts": pts, "expl": block.get("expl", ""),
+        })
     total = sum(int(b.get("pts") or 0) for b in content.get("blocks", []))
     percent = round(score / total * 100) if total else 0
     grade = grade_for(score, total, content.get("scale"))
@@ -537,11 +606,23 @@ class Handler(BaseHTTPRequestHandler):
     def route(self):
         return urlparse(self.path).path
 
-    def serve_index(self, head=False):
-        body = (BASE_DIR / "index.html").read_bytes()
+    def serve_file(self, filename, head=False):
+        path = BASE_DIR / filename
+        if not path.exists():
+            self.send_json({"detail": "Not Found"}, 404)
+            return
+        body = path.read_bytes()
         self.headers_out(200, "text/html; charset=utf-8", len(body), {"Cache-Control": "no-cache"})
         if not head:
             self.wfile.write(body)
+
+    def on_terms_host(self):
+        host = (self.headers.get("Host") or "").lower()
+        return host.startswith("terms.") or host.startswith("legal.")
+
+    def serve_index(self, head=False):
+        # Поддомен terms.* отдаёт пользовательское соглашение прямо на корне.
+        self.serve_file("terms.html" if self.on_terms_host() else "index.html", head)
 
     def do_HEAD(self):
         self.serve_index(True)
@@ -551,6 +632,8 @@ class Handler(BaseHTTPRequestHandler):
             path = self.route()
             if path in ("/", "/index.html"):
                 self.serve_index()
+            elif path in ("/terms", "/terms.html", "/terms/"):
+                self.serve_file("terms.html")
             elif path == "/health":
                 self.send_json({"ok": True, "bot": bool(BOT_TOKEN), "mode": TELEGRAM_MODE})
             elif path == "/api/bootstrap":
@@ -591,6 +674,14 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/tests": self.api_save_test,
                 "/api/maintenance": self.api_maintenance,
                 "/api/admin/wipe": self.api_admin_wipe,
+                "/api/sessions/revoke": self.api_session_revoke,
+                "/api/admin/users/role": self.api_user_role,
+                "/api/admin/users/password": self.api_user_password,
+                "/api/admin/users/delete": self.api_user_delete,
+                "/api/admin/notify": self.api_admin_notify,
+                "/api/notifications/read": self.api_notifications_read,
+                "/api/auth/password": self.api_change_password,
+                "/api/tests/resolve": self.api_test_resolve,
                 "/api/telegram/link": self.api_telegram_link,
                 "/api/telegram/unlink": self.api_telegram_unlink,
                 "/api/admin/employee-ids": self.api_employee_id,
@@ -658,10 +749,45 @@ class Handler(BaseHTTPRequestHandler):
                     "attempts": db.execute("SELECT COUNT(*) n FROM attempts").fetchone()["n"],
                 }
             me = user_json(user)
+            sessions = []
+            users = []
             if me:
                 link = db.execute("SELECT phone FROM telegram_links WHERE account_id=?", (str(user["id"]),)).fetchone()
                 me["tg"] = link["phone"] if link else ""
-        self.send_json({"ok": True, "me": me, "tests": tests, "drafts": owned, "attempts": attempts, "maintenance": maintenance, "admin": admin, "version": EVENT_ID})
+                token_hash = hashlib.sha256(self.cookie_token().encode()).hexdigest()
+                for row in db.execute(
+                    "SELECT rowid AS sid, token_hash, created_at, last_seen, user_agent FROM sessions WHERE user_id=? ORDER BY created_at",
+                    (user["id"],),
+                ).fetchall():
+                    current = hmac.compare_digest(row["token_hash"], token_hash)
+                    sessions.append({
+                        "id": row["sid"],
+                        "current": current,
+                        "device": describe_agent(row["user_agent"]),
+                        "started": time.strftime("%d.%m.%Y %H:%M", time.localtime(row["created_at"])),
+                        "active": time.strftime("%d.%m.%Y %H:%M", time.localtime(row["last_seen"])),
+                        "createdAt": row["created_at"],
+                    })
+                current_started = next((s["createdAt"] for s in sessions if s["current"]), None)
+                for item in sessions:
+                    item["canRevoke"] = item["current"] or (current_started is not None and item["createdAt"] > current_started)
+            if user and user["role"] == "dev":
+                users = [
+                    {
+                        "id": row["id"], "user": row["name"], "role": row["role"],
+                        "group": row["group_name"], "sid": row["employee_id"] or "",
+                        "short": row["initials"], "title": row["title"],
+                        "mustChange": bool(row["must_change_password"]),
+                        "created": time.strftime("%d.%m.%Y", time.localtime(row["created_at"])),
+                    }
+                    for row in db.execute("SELECT * FROM users ORDER BY role, name").fetchall()
+                ]
+            notes = notifications_for(db, user)
+        self.send_json({
+            "ok": True, "me": me, "tests": tests, "drafts": owned, "attempts": attempts,
+            "maintenance": maintenance, "admin": admin, "sessions": sessions, "users": users,
+            "notifications": notes, "version": EVENT_ID,
+        })
 
     def api_events(self):
         try:
@@ -699,7 +825,7 @@ class Handler(BaseHTTPRequestHandler):
             if not user or not verify_password(str(data.get("password", "")), user["password_hash"]):
                 self.send_json({"ok": False, "error": "Неверное имя или пароль"}, 401)
                 return
-            token = create_session(db, user["id"])
+            token = create_session(db, user["id"], self.headers.get("User-Agent", ""))
         cookie = f"idris_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"
         if APP_URL.startswith("https://"):
             cookie += "; Secure"
@@ -715,6 +841,9 @@ class Handler(BaseHTTPRequestHandler):
         if role not in ("student", "staff") or len(name) < 3 or len(password) < 6 or (role == "student" and not group):
             self.send_json({"ok": False, "error": "Проверьте поля; пароль от 6 символов"}, 400)
             return
+        if not data.get("accept_terms"):
+            self.send_json({"ok": False, "error": "Примите пользовательское соглашение"}, 400)
+            return
         with db_connect() as db:
             if db.execute("SELECT 1 FROM users WHERE name=? COLLATE NOCASE", (name,)).fetchone():
                 self.send_json({"ok": False, "error": "Такой пользователь уже существует"}, 409)
@@ -727,8 +856,11 @@ class Handler(BaseHTTPRequestHandler):
             user_id = cur.lastrowid
             if role == "staff":
                 db.execute("UPDATE employee_ids SET used_by=? WHERE code=? COLLATE NOCASE", (user_id, sid))
+            db.execute("UPDATE users SET accepted_terms=1 WHERE id=?", (user_id,))
+            push_notification(db, user_id, "Добро пожаловать в IDRIS STUDY",
+                              "Аккаунт создан. Проходите тесты и следите за результатами в разделе «Мои тесты».", "info")
             user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-            token = create_session(db, user_id)
+            token = create_session(db, user_id, self.headers.get("User-Agent", ""))
         emit_event("accounts")
         cookie = f"idris_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"
         if APP_URL.startswith("https://"):
@@ -846,10 +978,165 @@ class Handler(BaseHTTPRequestHandler):
             user = self.require_user(db, {"dev"})
             if not user:
                 return
-            value = {"on": bool(data.get("on")), "text": str(data.get("text") or "Ведутся технические работы.")[:500]}
+            previous = get_setting(db, "maintenance", {})
+            value = {
+                "on": bool(data.get("on")),
+                "text": str(data.get("text") or "Ведутся технические работы.")[:500],
+                "planned": str(data.get("planned") or "")[:40],
+                "notice": str(data.get("notice") or "")[:300],
+            }
             db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('maintenance',?)", (json.dumps(value, ensure_ascii=False),))
+            if value["planned"] and value["planned"] != previous.get("planned"):
+                when = value["planned"].replace("T", " ")
+                push_notification(db, None, "Плановые технические работы",
+                                  f"{when} — {value['notice'] or 'сайт будет временно недоступен.'}", "warning")
+            if value["on"] and not previous.get("on"):
+                push_notification(db, None, "Технический перерыв начался", value["text"], "warning")
         emit_event("maintenance")
         self.send_json({"ok": True, "maintenance": value})
+
+    def api_session_revoke(self):
+        data = self.read_json()
+        with db_connect() as db:
+            user = self.require_user(db)
+            if not user:
+                return
+            token_hash = hashlib.sha256(self.cookie_token().encode()).hexdigest()
+            current = db.execute("SELECT rowid AS sid, created_at FROM sessions WHERE token_hash=?", (token_hash,)).fetchone()
+            target = db.execute(
+                "SELECT rowid AS sid, created_at, user_id FROM sessions WHERE rowid=?", (int(data.get("id") or 0),)
+            ).fetchone()
+            if not current or not target or target["user_id"] != user["id"]:
+                self.send_json({"ok": False, "error": "Сессия не найдена"}, 404)
+                return
+            # Более ранняя сессия старше по правам: младшая не может завершить старшую.
+            if target["sid"] != current["sid"] and target["created_at"] <= current["created_at"]:
+                self.send_json({"ok": False, "error": "Эта сессия старше вашей — завершить её нельзя"}, 403)
+                return
+            db.execute("DELETE FROM sessions WHERE rowid=?", (target["sid"],))
+            closed_self = target["sid"] == current["sid"]
+        emit_event("sessions")
+        extra = {"Set-Cookie": "idris_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"} if closed_self else None
+        self.send_json({"ok": True, "self": closed_self}, extra=extra)
+
+    def api_user_role(self):
+        data = self.read_json()
+        role = str(data.get("role", ""))
+        with db_connect() as db:
+            admin = self.require_user(db, {"dev"})
+            if not admin:
+                return
+            target_id = int(data.get("user_id") or 0)
+            if role not in ("student", "staff", "dev") or target_id == admin["id"]:
+                self.send_json({"ok": False, "error": "Некорректная роль"}, 400)
+                return
+            title = {"student": "Студент", "staff": "Сотрудник IDRIS", "dev": "Разработчик"}[role]
+            db.execute("UPDATE users SET role=?,title=? WHERE id=?", (role, title, target_id))
+            push_notification(db, target_id, "Роль изменена", f"Администратор назначил вам роль «{title}».", "info")
+        emit_event("accounts")
+        self.send_json({"ok": True})
+
+    def api_user_password(self):
+        data = self.read_json()
+        with db_connect() as db:
+            admin = self.require_user(db, {"dev"})
+            if not admin:
+                return
+            target_id = int(data.get("user_id") or 0)
+            db.execute("UPDATE users SET must_change_password=1 WHERE id=?", (target_id,))
+            push_notification(
+                db, target_id, "Требуется смена пароля",
+                "Администратор попросил вас обновить пароль. Откройте профиль → «Мой профиль» → «Сменить пароль».",
+                "warning",
+            )
+        emit_event("accounts")
+        self.send_json({"ok": True})
+
+    def api_user_delete(self):
+        data = self.read_json()
+        with db_connect() as db:
+            admin = self.require_user(db, {"dev"})
+            if not admin:
+                return
+            target_id = int(data.get("user_id") or 0)
+            if target_id == admin["id"]:
+                self.send_json({"ok": False, "error": "Нельзя удалить свой аккаунт"}, 400)
+                return
+            db.execute("DELETE FROM users WHERE id=?", (target_id,))
+        emit_event("accounts")
+        self.send_json({"ok": True})
+
+    def api_change_password(self):
+        data = self.read_json()
+        new_password = str(data.get("new_password", ""))
+        with db_connect() as db:
+            user = self.require_user(db)
+            if not user:
+                return
+            if not verify_password(str(data.get("current_password", "")), user["password_hash"]):
+                self.send_json({"ok": False, "error": "Текущий пароль неверен"}, 403)
+                return
+            if len(new_password) < 6:
+                self.send_json({"ok": False, "error": "Новый пароль от 6 символов"}, 400)
+                return
+            db.execute(
+                "UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?",
+                (hash_password(new_password), user["id"]),
+            )
+            token_hash = hashlib.sha256(self.cookie_token().encode()).hexdigest()
+            db.execute("DELETE FROM sessions WHERE user_id=? AND token_hash<>?", (user["id"], token_hash))
+        emit_event("accounts")
+        self.send_json({"ok": True})
+
+    def api_admin_notify(self):
+        data = self.read_json()
+        with db_connect() as db:
+            admin = self.require_user(db, {"dev"})
+            if not admin:
+                return
+            target = data.get("user_id")
+            push_notification(
+                db, int(target) if target else None,
+                data.get("title") or "Уведомление",
+                data.get("body") or "",
+                str(data.get("kind") or "info"),
+            )
+        emit_event("notifications")
+        self.send_json({"ok": True})
+
+    def api_notifications_read(self):
+        with db_connect() as db:
+            user = self.current_user(db)
+            if not user:
+                self.send_json({"ok": True})
+                return
+            db.execute(
+                "INSERT OR IGNORE INTO notification_reads(notification_id,user_id) "
+                "SELECT id,? FROM notifications WHERE user_id IS NULL OR user_id=?",
+                (user["id"], user["id"]),
+            )
+        self.send_json({"ok": True})
+
+    def api_test_resolve(self):
+        data = self.read_json()
+        code = str(data.get("code", "")).strip().upper()
+        with db_connect() as db:
+            row = db.execute(
+                "SELECT t.*,u.name author_name FROM tests t JOIN users u ON u.id=t.author_id WHERE UPPER(t.qr_code)=?",
+                (code,),
+            ).fetchone()
+            if not row or not row["published"]:
+                self.send_json({"ok": False, "error": "Тест не найден"}, 404)
+                return
+            token = secrets.token_urlsafe(30)
+            now = int(time.time())
+            db.execute(
+                "INSERT INTO quiz_sessions(token_hash,test_id,created_at,expires_at) VALUES(?,?,?,?)",
+                (hashlib.sha256(token.encode()).hexdigest(), row["id"], now, now + QUIZ_TTL),
+            )
+            payload = serialize_test(db, row)
+            content = test_content(row)
+        self.send_json({"ok": True, "token": token, "test": payload, "blocks": public_blocks(content.get("blocks", []))})
 
     def api_admin_wipe(self):
         with db_connect() as db:

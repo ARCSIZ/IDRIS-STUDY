@@ -1274,6 +1274,154 @@ html.dark .res-right { color: #8fdcc4; }
 html.dark .rec-row { background: rgba(255,255,255,.07); border-color: rgba(255,255,255,.13); color: #c2d6d1; }
 html.dark .rec-row b { color: #7fd9c2; }
 
+/* ---- notifications ---- */
+.bell-dot {
+  position: absolute; top: 8px; right: 9px; width: 9px; height: 9px; border-radius: 50%;
+  background: #e0655a; border: 2px solid #fff; opacity: 0; transform: scale(.4);
+  transition: opacity .3s, transform .3s cubic-bezier(.34,1.6,.64,1);
+}
+.bell-dot.on { opacity: 1; transform: scale(1); }
+.notif {
+  position: fixed; top: 86px; right: 26px; width: 330px; max-height: 66vh; z-index: 130;
+  display: flex; flex-direction: column; border-radius: 22px; overflow: hidden;
+  background: rgba(255,255,255,.8);
+  backdrop-filter: blur(26px) saturate(180%); -webkit-backdrop-filter: blur(26px) saturate(180%);
+  border: 1px solid rgba(255,255,255,.92);
+  box-shadow: 0 34px 70px -22px rgba(38,73,66,.55);
+  opacity: 0; visibility: hidden; transform: translateY(-14px) scale(.95); transform-origin: top right;
+  transition: opacity .3s, transform .45s cubic-bezier(.34,1.4,.64,1), visibility 0s .45s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+}
+.notif.open { opacity: 1; visibility: visible; transform: none; transition: opacity .3s, transform .5s cubic-bezier(.34,1.42,.64,1); }
+.nt-head { display: flex; align-items: center; gap: 8px; padding: 13px 14px; border-bottom: 1px solid rgba(90,130,122,.15); }
+.nt-title { flex: 1; font-size: 14px; font-weight: 600; color: #1f4a42; display: flex; align-items: center; gap: 8px; }
+.nt-title .lucide { width: 16px; height: 16px; }
+.nt-body { padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.nt-item {
+  padding: 12px 14px; border-radius: 16px; font-size: 13px; position: relative;
+  background: rgba(255,255,255,.75); border: 1px solid rgba(255,255,255,.9); color: #2b544d;
+  animation: rowIn .4s cubic-bezier(.22,1,.36,1) both;
+}
+.nt-item.unseen { border-left: 3px solid var(--acc-b, #4aa892); }
+.nt-item.warning { border-left: 3px solid #d89246; }
+.nt-h { font-weight: 600; color: #1f4a42; margin-bottom: 3px; }
+.nt-d { font-size: 11px; color: #8aa9a2; margin-top: 6px; }
+.nt-empty { text-align: center; font-size: 12.5px; color: #8aa9a2; padding: 26px 10px; }
+html.dark .notif { background: rgba(26,42,40,.92); border-color: rgba(255,255,255,.14); }
+html.dark .nt-item { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.12); color: #c2d6d1; }
+html.dark .nt-h, html.dark .nt-title { color: #dceae6; }
+
+/* ---- planned maintenance + cookie ---- */
+.plan-banner, .cookie {
+  position: fixed; z-index: 140; display: none; align-items: center; gap: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+}
+.plan-banner {
+  top: 0; left: 0; right: 0; padding: 10px 16px; justify-content: center; font-size: 13px;
+  color: #6b4415; background: linear-gradient(90deg, rgba(240,196,140,.95), rgba(236,176,110,.95));
+  box-shadow: 0 10px 24px -18px rgba(90,60,20,.9);
+}
+.plan-banner.on { display: flex; animation: rowIn .5s ease both; }
+.plan-banner .lucide { width: 16px; height: 16px; }
+.plan-banner button { border: none; background: none; cursor: pointer; color: #6b4415; display: grid; place-items: center; }
+.cookie {
+  left: 16px; right: 16px; bottom: 16px; max-width: 620px; margin: 0 auto; padding: 14px 16px;
+  border-radius: 20px; font-size: 12.5px; color: #2b544d;
+  background: rgba(255,255,255,.9); border: 1px solid rgba(255,255,255,.95);
+  box-shadow: 0 26px 56px -24px rgba(38,73,66,.7);
+}
+.cookie.on { display: flex; animation: rowIn .6s cubic-bezier(.22,1,.36,1) both; }
+.cookie .lucide { width: 20px; height: 20px; color: var(--acc-b, #3c8b7a); flex: none; }
+.cookie span { flex: 1; }
+.cookie a, .agree a { color: #2f7a68; }
+.cookie .ed-primary { padding: 9px 18px; flex: none; }
+html.dark .cookie { background: rgba(26,42,40,.95); border-color: rgba(255,255,255,.14); color: #c2d6d1; }
+
+/* ---- consent + sessions + accounts ---- */
+.agree { display: flex; gap: 9px; align-items: flex-start; font-size: 12px; color: #5d857d; margin: 4px 0 10px; text-align: left; }
+.agree input { width: 17px; height: 17px; accent-color: #3c8b7a; flex: none; margin-top: 1px; }
+html.dark .agree { color: #a8c8c0; }
+.sess-row, .usr-row {
+  display: flex; align-items: center; gap: 11px; padding: 11px 13px; margin-bottom: 7px; border-radius: 15px;
+  background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.85);
+  animation: rowIn .4s cubic-bezier(.22,1,.36,1) both;
+}
+.sess-ic { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; flex: none;
+  background: rgba(96,197,167,.18); color: #3c8b7a; }
+.sess-ic .lucide { width: 16px; height: 16px; }
+.sess-info, .usr-info { flex: 1; min-width: 0; }
+.sess-dev, .usr-name2 { font-size: 13px; font-weight: 500; color: #22453e; }
+.sess-meta, .usr-meta { font-size: 11px; color: #7ea49c; }
+.sess-cur { font-size: 10.5px; padding: 3px 9px; border-radius: 99px; background: rgba(96,197,167,.22); color: #1f6b58; flex: none; }
+.usr-role { padding: 6px 9px; border-radius: 11px; font: 12px inherit; color: #2b544d; flex: none;
+  background: rgba(255,255,255,.7); border: 1px solid rgba(255,255,255,.9); }
+html.dark .sess-row, html.dark .usr-row, html.dark .usr-role { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.14); color: #c2d6d1; }
+html.dark .sess-dev, html.dark .usr-name2 { color: #dceae6; }
+
+/* ---- compact editor tools ---- */
+.ed-tools { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.ed-find { flex: 1; min-width: 150px; }
+.ed-tool {
+  display: inline-flex; align-items: center; gap: 6px; padding: 9px 12px; border-radius: 12px; cursor: pointer;
+  font-size: 12px; color: #3f6f66; background: rgba(255,255,255,.6); border: 1px solid rgba(255,255,255,.88);
+  transition: background .25s, transform .25s;
+}
+.ed-tool:hover { background: #fff; transform: translateY(-1px); }
+.ed-tool .lucide { width: 14px; height: 14px; }
+.ed-auto { font-size: 11px; color: #8aa9a2; margin-left: auto; }
+.ed-optsbar { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 12px; }
+.ed-chip {
+  display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: 99px; cursor: pointer;
+  font-size: 12px; color: #3f6f66; background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.85);
+}
+.ed-chip .lucide { width: 14px; height: 14px; }
+.ed-chip input[type=checkbox] { accent-color: #3c8b7a; width: 15px; height: 15px; }
+.ed-chip input[type=number] { width: 52px; padding: 4px 6px; border-radius: 8px; border: 1px solid rgba(255,255,255,.9);
+  background: rgba(255,255,255,.7); font: 12px inherit; color: #22453e; outline: none; }
+.ed-block { padding: 13px 13px 13px 17px; margin-bottom: 10px; }
+.ed-block.hidden-find { display: none; }
+.ed-mini { width: 26px; height: 26px; border: none; border-radius: 8px; cursor: pointer; display: grid; place-items: center;
+  background: rgba(120,160,152,.14); color: #3f6f66; transition: background .25s; }
+.ed-mini:hover { background: rgba(120,160,152,.3); }
+.ed-mini .lucide { width: 14px; height: 14px; }
+.ed-fold-preview { font-size: 12.5px; color: #6f9a91; padding: 2px 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ed-linkbtn { margin-top: 7px; padding: 6px 11px; border-radius: 10px; cursor: pointer; font-size: 11.5px; color: #3f6f66;
+  background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.85); display: inline-flex; align-items: center; gap: 6px; }
+.ed-linkbtn .lucide { width: 13px; height: 13px; }
+.ed-expl { width: 100%; margin-top: 9px; padding: 8px 12px; border-radius: 12px; font: 12.5px inherit; color: #2b544d;
+  background: rgba(255,255,255,.5); border: 1px dashed rgba(90,140,130,.4); outline: none; }
+html.dark .ed-tool, html.dark .ed-chip, html.dark .ed-linkbtn, html.dark .ed-expl, html.dark .ed-chip input[type=number] {
+  background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.15); color: #c2d6d1; }
+a.rich-link { color: #2f7a68; text-decoration: underline; text-underline-offset: 2px; }
+html.dark a.rich-link { color: #7fd9c2; }
+.pl-timer { font-size: 12px; color: #b3574e; font-weight: 600; }
+
+/* ---- mobile fixes ---- */
+@media (max-width: 760px) {
+  .notif { top: 74px; left: 10px; right: 10px; width: auto; max-height: 70vh; }
+  .plan-banner { font-size: 11.5px; padding: 8px 12px; }
+  .cookie { flex-direction: column; text-align: center; gap: 10px; bottom: 10px; }
+  .cookie .ed-primary { width: 100%; justify-content: center; }
+  /* окно входа/регистрации: контент скроллится, кнопка всегда достижима */
+  .login-modal, .dlg, .test-card {
+    max-height: 88vh; display: flex; flex-direction: column;
+  }
+  .login-box, .dlg-in, .tc-body { overflow-y: auto; max-height: 86vh; padding-bottom: 22px; }
+  .login-go, .dlg-row { position: sticky; bottom: 0; }
+  .dlg-row { background: linear-gradient(180deg, transparent, rgba(255,255,255,.9) 40%); padding-top: 10px; }
+  html.dark .dlg-row { background: linear-gradient(180deg, transparent, rgba(26,42,40,.95) 40%); }
+  /* крестики не перекрывают контент */
+  .modal-close, .tc-x { top: 10px; right: 10px; width: 34px; height: 34px; }
+  .dlg .dlg-in, .test-card .tc-body { padding-top: 52px; }
+  .login-box { padding-top: 26px; }
+  .auth-tabs { margin-top: 6px; }
+  .ef-head { padding-right: 54px; }
+  .ef-head .modal-close { position: absolute; top: 10px; right: 10px; }
+  .ed-tools, .ed-optsbar { gap: 6px; }
+  .ed-tool span, .ed-auto { display: none; }
+  .nt-body { padding: 10px; }
+}
+
 /* ---- inline stats view ---- */
 .st-back {
   display: inline-flex; align-items: center; gap: 7px; margin-bottom: 12px;
@@ -2029,6 +2177,43 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
 
   <div class="grain"></div>
 
+<!-- notifications -->
+<aside class="notif" id="notifPanel" aria-hidden="true">
+  <header class="nt-head">
+    <span class="nt-title"><i data-lucide="bell"></i> Уведомления</span>
+    <button class="mg-btn" id="ntReadAll" title="Прочитать всё"><i data-lucide="check-check"></i></button>
+    <button class="mg-btn" id="ntClose"><i data-lucide="x"></i></button>
+  </header>
+  <div class="nt-body" id="ntBody"></div>
+</aside>
+
+<!-- planned maintenance banner -->
+<div class="plan-banner" id="planBanner">
+  <i data-lucide="calendar-clock"></i><span id="planText"></span>
+  <button id="planHide"><i data-lucide="x"></i></button>
+</div>
+
+<!-- cookie consent -->
+<div class="cookie" id="cookieBar">
+  <i data-lucide="cookie"></i>
+  <span>Мы используем файлы cookie для входа в аккаунт и сохранения настроек. Продолжая, вы принимаете
+    <a href="/terms" target="_blank" rel="noopener">пользовательское соглашение</a>.</span>
+  <button class="ed-primary" id="cookieOk">Принять</button>
+</div>
+
+<!-- change password -->
+<section class="modal dlg" id="pwdDlg" role="dialog" aria-hidden="true"><div class="dlg-in">
+  <div class="dlg-t">Смена пароля</div>
+  <div class="dlg-s" id="pwdHint">Введите текущий и новый пароль. Другие сессии будут завершены.</div>
+  <input id="pwdCur" type="password" placeholder="Текущий пароль">
+  <input id="pwdNew" type="password" placeholder="Новый пароль (от 6 символов)">
+  <div class="dlg-s" id="pwdErr" style="color:#b3574e;display:none"></div>
+  <div class="dlg-row">
+    <button class="btn-ghost" data-close-dlg>Отмена</button>
+    <button class="ed-primary" id="pwdGo" style="flex:1;justify-content:center">Сохранить</button>
+  </div>
+</div></section>
+
 <!-- maintenance overlay -->
 <div class="maint" id="maintOverlay">
   <div class="maint-box">
@@ -2140,6 +2325,9 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       <label class="login-f" id="regGroupF"><span>Номер группы</span><input id="regGroup" placeholder="СД-25-0"></label>
       <label class="login-f" id="regIdF" style="display:none"><span>ID сотрудника</span><input id="regId" placeholder="IDR-0000"></label>
       <label class="login-f"><span>Пароль</span><input id="regPass" type="password" placeholder="Минимум 4 символа"></label>
+      <label class="agree"><input type="checkbox" id="regAgree">
+        <span>Я принимаю <a href="/terms" target="_blank" rel="noopener">пользовательское соглашение</a> и согласен на обработку учебных данных.</span>
+      </label>
       <div class="login-err" id="regErr">Заполните все поля</div>
       <button class="ed-primary login-go" id="regGo"><i data-lucide="user-plus"></i> Зарегистрироваться</button>
     </div>
@@ -2269,6 +2457,10 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       <i data-lucide="life-buoy"></i>
     </button>
     <div class="divider"></div>
+    <button class="g-btn" id="bellBtn" aria-label="Уведомления">
+      <i data-lucide="bell"></i><span class="bell-dot" id="bellDot"></span>
+    </button>
+    <div class="divider"></div>
     <button class="g-btn" aria-label="Профиль" title="Профиль">
       <i data-lucide="user-round"></i>
     </button>
@@ -2385,6 +2577,10 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       <div class="row"><span class="row-label">Уведомления<span class="row-sub">Звук и всплывающие окна</span></span><div class="sw on" role="switch" data-set="notify"></div></div>
       <div class="row tg-row"><span class="row-label">Telegram-уведомления <span class="beta-tag">beta</span><span class="row-sub" id="tgState">Не подключено</span></span><button class="mg-btn" id="tgBtn"><i data-lucide="send"></i></button></div>
       <div class="row tg-row"><span class="row-label">Ручная шкала оценок <span class="beta-tag">beta</span><span class="row-sub">Настройка баллов в редакторе</span></span><div class="sw" role="switch" data-set="beta"></div></div>
+      <div class="row"><span class="row-label">Пароль<span class="row-sub">Смена пароля завершит другие сессии</span></span><button class="mg-btn" id="pwdOpen"><i data-lucide="key-round"></i></button></div>
+      <div class="p-sect">Активные сессии</div>
+      <div id="sessList"></div>
+      <div class="dlg-s" style="margin:4px 2px 0">Сессия, вошедшая раньше, может завершать более поздние. Обратное запрещено.</div>
     </div>
 
     <div class="pane" data-pane="ptests">
@@ -2398,6 +2594,20 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       <div class="row"><span class="row-label">Технический перерыв<span class="row-sub">Закрыть сайт для всех пользователей</span></span><div class="sw" role="switch" id="maintSw"></div></div>
       <div class="row"><span class="row-label">Текст для посетителей<span class="row-sub">Показывается на заглушке</span></span></div>
       <input class="ed-title" id="maintText" value="Ведутся технические работы. Скоро вернёмся!" style="width:100%">
+      <div class="p-sect">Плановые работы</div>
+      <div class="row"><span class="row-label">Дата и время<span class="row-sub">Все получат уведомление заранее</span></span><input class="sch-time" type="datetime-local" id="planAt" style="padding:7px 9px;border-radius:11px"></div>
+      <input class="ed-title" id="planNote" placeholder="Комментарий: что будет недоступно" style="width:100%">
+
+      <div class="p-sect">Рассылка уведомлений</div>
+      <input class="ed-title" id="ntTitleIn" placeholder="Заголовок уведомления" style="width:100%">
+      <input class="ed-title" id="ntBodyIn" placeholder="Текст уведомления" style="width:100%;margin-top:8px">
+      <button class="ed-primary" id="ntSend" style="margin-top:9px"><i data-lucide="send"></i> Отправить всем</button>
+
+      <div class="p-sect">Аккаунты</div>
+      <div class="st-search" style="margin-bottom:9px"><i data-lucide="search"></i><input id="usrSearch" placeholder="Поиск по имени, группе или роли"></div>
+      <div id="usrList"></div>
+
+      <div class="p-sect">Данные платформы</div>
       <div class="p-sect">Данные платформы</div>
       <div class="row"><span class="row-label">Аккаунтов<span class="row-sub" id="admAcc">0</span></span><i data-lucide="users" class="row-ico"></i></div>
       <div class="row"><span class="row-label">Тестов создано<span class="row-sub" id="admTests">0</span></span><i data-lucide="clipboard-list" class="row-ico"></i></div>
@@ -2466,6 +2676,21 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
 
   <div class="ef-body">
     <div class="ef-canvas">
+      <div class="ed-tools">
+        <div class="st-search ed-find"><i data-lucide="search"></i><input id="edFind" placeholder="Поиск по вопросам"></div>
+        <button class="ed-tool" id="edFold"><i data-lucide="fold-vertical"></i>Свернуть</button>
+        <button class="ed-tool" id="edBulk"><i data-lucide="scale"></i>Баллы всем</button>
+        <button class="ed-tool" id="edExport"><i data-lucide="download"></i>Экспорт</button>
+        <label class="ed-tool"><i data-lucide="upload"></i>Импорт<input type="file" id="edImport" accept="application/json" hidden></label>
+        <span class="ed-auto" id="edAuto">Черновик сохраняется автоматически</span>
+      </div>
+      <div class="ed-optsbar">
+        <label class="ed-chip"><input type="checkbox" id="optShuffle"><i data-lucide="shuffle"></i>Перемешивать вопросы</label>
+        <label class="ed-chip"><input type="checkbox" id="optReview" checked><i data-lucide="eye"></i>Показывать разбор</label>
+        <label class="ed-chip"><input type="checkbox" id="optOnce"><i data-lucide="lock"></i>Одна попытка</label>
+        <label class="ed-chip"><i data-lucide="timer"></i>Таймер
+          <input type="number" id="optTimer" min="0" max="240" value="0" title="минут"> мин</label>
+      </div>
       <div id="edBlocks"></div>
       <div class="ed-empty" id="edEmpty">Пока нет вопросов — добавьте первый блок</div>
       <div class="ed-toast" id="edToast">
@@ -2568,30 +2793,62 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     notify:   v => root.classList.toggle('silent', !v),
   };
 
+  /* ---------- persisted customization ---------- */
+  const PREF_KEY = 'idris_prefs';
+  const prefs = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
+  const savePrefs = () => localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
+
   // switches (with guard against missing handlers)
   document.querySelectorAll('.sw[data-set]').forEach(sw => {
+    const key = sw.dataset.set;
+    if (prefs[key] !== undefined && ['dark','compact','iconAnim','trans','reduced','beta'].includes(key))
+      sw.classList.toggle('on', !!prefs[key]);
     sw.addEventListener('click', () => {
       sw.classList.toggle('on');
-      apply[sw.dataset.set]?.(sw.classList.contains('on'));
+      prefs[key] = sw.classList.contains('on'); savePrefs();
+      apply[key]?.(sw.classList.contains('on'));
     });
-    apply[sw.dataset.set]?.(sw.classList.contains('on'));
+    apply[key]?.(sw.classList.contains('on'));
   });
 
   // sliders
   document.querySelectorAll('.rng[data-set]').forEach(r => {
-    r.addEventListener('input', () => apply[r.dataset.set]?.(+r.value));
+    if (prefs[r.dataset.set] !== undefined) r.value = prefs[r.dataset.set];
+    r.addEventListener('input', () => {
+      prefs[r.dataset.set] = +r.value; savePrefs();
+      apply[r.dataset.set]?.(+r.value);
+    });
     apply[r.dataset.set]?.(+r.value);
   });
 
   // segmented
   document.querySelectorAll('.seg[data-set]').forEach(seg => {
+    const stored = prefs[seg.dataset.set];
+    if (stored !== undefined) seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === stored));
     seg.querySelectorAll('button').forEach(b =>
       b.addEventListener('click', () => {
         seg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
         b.classList.add('on');
+        prefs[seg.dataset.set] = b.dataset.v; savePrefs();
         apply[seg.dataset.set]?.(b.dataset.v);
       }));
     apply[seg.dataset.set]?.(seg.querySelector('button.on')?.dataset.v);
+  });
+
+  // сохранённая тема оформления
+  window.addEventListener('load', () => {
+    if (prefs.theme) {
+      document.getElementById('extraSw')?.classList.add('on');
+      document.getElementById('themeGrid')?.classList.remove('locked');
+      document.getElementById('basePal')?.classList.add('locked');
+      root.setAttribute('data-theme', prefs.theme);
+      root.classList.toggle('dark', ['midnight', 'carbon'].includes(prefs.theme));
+      document.querySelector(`.thm[data-theme="${prefs.theme}"]`)?.classList.add('on');
+    } else if (prefs.dark) {
+      root.classList.add('dark');
+      document.querySelector('.pal[data-base="dark"]')?.classList.add('on');
+      document.querySelector('.pal[data-base="light"]')?.classList.remove('on');
+    }
   });
 
   settingsBtn.addEventListener('click', () => {
@@ -2731,12 +2988,17 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
           <button class="ed-grip" data-act="grip" title="Перетащить"><i data-lucide="grip-vertical"></i></button>
           <span class="ed-type">${TYPE_LABEL[b.type]}</span>
           <span class="ed-num">Вопрос ${i + 1}${b.req ? '<span class="req-star">*</span>' : ''}</span>
-          <button class="ed-req ${b.req ? 'on' : ''}" data-act="req" title="${b.req ? 'Обязательный вопрос' : 'Сделать обязательным'}">*</button>
+          <button class="ed-req ${b.req ? 'on' : ''}" data-act="req">*</button>
           <span class="ed-pts-lbl">баллы</span>
           <input class="ed-pts" type="number" min="0" max="100" value="${b.pts}" data-act="pts">
-          <button class="ed-del" data-act="del" title="Удалить вопрос"><i data-lucide="x"></i></button>
+          <button class="ed-mini" data-act="dup"><i data-lucide="copy"></i></button>
+          <button class="ed-mini" data-act="fold"><i data-lucide="${b.folded ? 'chevron-down' : 'chevron-up'}"></i></button>
+          <button class="ed-del" data-act="del"><i data-lucide="x"></i></button>
         </div>
-        <textarea class="ed-q" data-act="q" placeholder="Текст вопроса…">${esc(b.q)}</textarea>
+        ${b.folded ? `<div class="ed-fold-preview">${esc(b.q) || 'Без текста'}</div>` : ''}
+        <div class="ed-body" ${b.folded ? 'hidden' : ''}>
+        <textarea class="ed-q" data-act="q" placeholder="Текст вопроса… (ссылки вставляются как https://…)">${esc(b.q)}</textarea>
+        <button class="ed-linkbtn" data-act="link"><i data-lucide="link"></i>Вставить ссылку</button>
         <div class="ed-img">
           <label class="ed-imgbtn"><i data-lucide="image-plus"></i>${b.img ? 'Заменить изображение' : 'Добавить изображение'}
             <input type="file" accept="image/*" hidden data-act="img">
@@ -2760,6 +3022,8 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
           <button class="ed-addopt" data-act="addopt"><i data-lucide="plus"></i>Добавить вариант</button>
           <div class="ed-hint">${b.type === 'single' ? 'Отметьте один правильный вариант' : 'Отметьте все правильные варианты'}</div>
         `}
+        <input class="ed-expl" data-act="expl" value="${esc(b.expl || '')}" placeholder="Пояснение к ответу (покажется в разборе)">
+        </div>
       </div>`).join('');
 
     edEmpty.style.display = blocks.length ? 'none' : '';
@@ -2830,7 +3094,89 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     if (act === 'addopt') { b.opts.push({ t: '', ok: false }); renderBlocks(); }
     if (act === 'imgdel') { b.img = null; renderBlocks(); }
     if (act === 'req')    { b.req = !b.req; renderBlocks(); }
+    if (act === 'fold')   { b.folded = !b.folded; renderBlocks(); }
+    if (act === 'dup') {
+      const copy = JSON.parse(JSON.stringify(b));
+      copy.id = ++uid; copy.folded = false;
+      blocks.splice(blocks.indexOf(b) + 1, 0, copy);
+      renderBlocks();
+    }
+    if (act === 'link') {
+      const url = prompt('Ссылка (https://…)');
+      if (url) { b.q = (b.q ? b.q + ' ' : '') + url.trim(); renderBlocks(); }
+    }
   });
+
+  /* ---------- editor tools ---------- */
+  const testOpts = { shuffle: false, review: true, once: false, timer: 0 };
+  ['optShuffle', 'optReview', 'optOnce', 'optTimer'].forEach(id => {
+    const el = document.getElementById(id);
+    el?.addEventListener('change', () => {
+      const key = id.replace('opt', '').toLowerCase();
+      testOpts[key] = el.type === 'checkbox' ? el.checked : +el.value || 0;
+      autosaveDraft();
+    });
+  });
+  document.getElementById('edFind').addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    edBlocks.querySelectorAll('.ed-block').forEach(card => {
+      const block = blocks.find(x => x.id === +card.dataset.id);
+      card.classList.toggle('hidden-find', !!q && !(block?.q || '').toLowerCase().includes(q));
+    });
+  });
+  document.getElementById('edFold').addEventListener('click', () => {
+    const anyOpen = blocks.some(b => !b.folded);
+    blocks.forEach(b => b.folded = anyOpen);
+    renderBlocks();
+  });
+  document.getElementById('edBulk').addEventListener('click', () => {
+    const value = prompt('Сколько баллов проставить всем вопросам?', '1');
+    if (value === null) return;
+    blocks.forEach(b => b.pts = Math.max(0, +value || 0));
+    renderBlocks();
+  });
+  document.getElementById('edExport').addEventListener('click', () => {
+    const payload = { title: edTitle.value, desc: document.getElementById('edDesc').value, blocks, scale: curScale, options: testOpts };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = (edTitle.value || 'test') + '.json'; a.click();
+    URL.revokeObjectURL(url);
+  });
+  document.getElementById('edImport').addEventListener('change', e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (Array.isArray(data.blocks)) {
+          blocks = data.blocks;
+          uid = blocks.reduce((m, b) => Math.max(m, b.id || 0), 0);
+          edTitle.value = data.title || edTitle.value;
+          document.getElementById('edDesc').value = data.desc || '';
+          curScale = data.scale || null;
+          renderBlocks();
+          flash('Тест импортирован ✓');
+        }
+      } catch (err) { flash('Не удалось прочитать файл'); }
+    };
+    reader.readAsText(file);
+  });
+
+  // автосохранение черновика на устройстве
+  let autoTimer;
+  function autosaveDraft() {
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(() => {
+      localStorage.setItem('idris_draft', JSON.stringify({
+        title: edTitle.value, desc: document.getElementById('edDesc').value, blocks, scale: curScale, options: testOpts
+      }));
+      const mark = document.getElementById('edAuto');
+      if (mark) { mark.textContent = 'Черновик сохранён ' + new Date().toLocaleTimeString('ru-RU').slice(0, 5); }
+    }, 900);
+  }
+  edBlocks.addEventListener('input', autosaveDraft);
+  edTitle.addEventListener('input', autosaveDraft);
 
   /* ---------- drag & drop reordering ---------- */
   let dragId = null;
@@ -2877,6 +3223,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     const b = findBlock(t);
     const act = t.dataset.act;
     if (act === 'q') b.q = t.value;
+    if (act === 'expl') b.expl = t.value;
     if (act === 'answer') b.answer = t.value;
     if (act === 'opt') b.opts[+t.closest('.ed-opt').dataset.oi].t = t.value;
     if (act === 'pts') { b.pts = Math.max(0, +t.value || 0); edTotal.textContent = blocks.reduce((s, x) => s + (+x.pts || 0), 0); }
@@ -3176,8 +3523,15 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   /* ---------- server API ---------- */
   const DB = { maint: { on: false, text: 'Ведутся технические работы. Скоро вернёмся!' } };
   let serverAdmin = null;
+  let serverSessions = [], serverUsers = [], serverNotes = [];
   let syncBusy = false;
   let currentUser = null;
+
+  // Текст с автоматическим превращением ссылок в кликабельные.
+  const rich = (text) => esc(text || '').replace(
+    /(https?:\/\/[^\s<]+[^\s<.,:;"')\]])/g,
+    '<a class="rich-link" href="$1" target="_blank" rel="noopener">$1</a>'
+  );
 
   async function api(path, options = {}) {
     const response = await fetch(path, {
@@ -3212,7 +3566,14 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       drafts = data.drafts || [];
       saved = drafts;
       serverAdmin = data.admin || null;
+      serverSessions = data.sessions || [];
+      serverUsers = data.users || [];
+      serverNotes = data.notifications || [];
       DB.maint = data.maintenance || DB.maint;
+      renderNotifications();
+      renderSessions();
+      renderUsers();
+      renderPlanBanner();
       if (data.me) {
         data.me.attempts = data.attempts || [];
         applyRole(data.me);
@@ -3303,10 +3664,14 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       err.classList.add('show'); return;
     }
     const sid = document.getElementById('regId').value.trim();
+    if (!document.getElementById('regAgree').checked) {
+      err.textContent = 'Примите пользовательское соглашение';
+      err.classList.add('show'); return;
+    }
     try {
       const data = await api('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ name, password: pass, role: regRole, group, employee_id: sid })
+        body: JSON.stringify({ name, password: pass, role: regRole, group, employee_id: sid, accept_terms: true })
       });
       err.classList.remove('show');
       applyRole(data.user);
@@ -3334,7 +3699,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
           ${t.acc === 'qr' ? '<span class="tcard-lock"><i data-lucide="qr-code"></i>QR-код</span>' : ''}
         </div>
         <div class="tcard-name">${esc(t.title)}</div>
-        <div class="tcard-desc">${esc(t.desc || 'Описание не указано')}</div>
+        <div class="tcard-desc">${rich(t.desc || 'Описание не указано')}</div>
         <div class="tcard-foot"><span>${t.count} вопр.</span><span>${esc(t.author || 'Преподаватель')}</span></div>
       </button>`).join('');
     homeEmpty.style.display = published.length ? 'none' : '';
@@ -3455,7 +3820,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
           <span class="ed-num">Вопрос ${i + 1}${b.req ? '<span class="req-star">*</span>' : ''}</span>
           <span class="ed-pts-lbl">${b.pts} б.</span>
         </div>
-        <div class="pl-q">${esc(b.q) || 'Без текста'}</div>
+        <div class="pl-q">${rich(b.q) || 'Без текста'}</div>
         ${b.img ? `<img class="pl-img" src="${b.img}" alt="">` : ''}
         ${b.type === 'text'
           ? `<input class="pl-input" data-q="${b.id}" placeholder="Ваш ответ…">`
@@ -3562,9 +3927,10 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
       openIdx = i; btn.classList.add('act');
       const r = review[i];
       detail.innerHTML = `<div class="res-detail">
-          <div class="res-q">${i + 1}. ${esc(r.q)} <span style="font-weight:400;font-size:12px;color:#7ea49c">· ${r.pts} б.</span></div>
-          <div class="res-line ${r.ok ? 'res-right' : 'res-yours'}"><b>Ваш ответ:</b> ${esc(r.yours)}</div>
-          ${r.ok ? '' : `<div class="res-line res-right"><b>Правильный ответ:</b> ${esc(r.right || '—')}</div>`}
+          <div class="res-q">${i + 1}. ${rich(r.q)} <span style="font-weight:400;font-size:12px;color:#7ea49c">· ${r.pts} б.</span></div>
+          <div class="res-line ${r.ok ? 'res-right' : 'res-yours'}"><b>Ваш ответ:</b> ${rich(r.yours)}</div>
+          ${r.ok ? '' : `<div class="res-line res-right"><b>Правильный ответ:</b> ${rich(r.right || '—')}</div>`}
+          ${r.expl ? `<div class="res-line res-right"><b>Пояснение:</b> ${rich(r.expl)}</div>` : ''}
         </div>`;
     }));
     document.getElementById('resAgain').addEventListener('click', async () => {
@@ -3671,6 +4037,7 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
   themeGrid.querySelectorAll('.thm').forEach(t => t.addEventListener('click', () => {
     themeGrid.querySelectorAll('.thm').forEach(x => x.classList.remove('on'));
     t.classList.add('on');
+    prefs.theme = t.dataset.theme; savePrefs();
     smooth(() => {
       root.setAttribute('data-theme', t.dataset.theme);
       root.classList.toggle('dark', ['midnight', 'carbon'].includes(t.dataset.theme));
@@ -3793,7 +4160,11 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     try {
       const data = await api('/api/maintenance', {
         method: 'POST',
-        body: JSON.stringify({ on: DB.maint.on, text: DB.maint.text })
+        body: JSON.stringify({
+          on: DB.maint.on, text: DB.maint.text,
+          planned: document.getElementById('planAt')?.value || '',
+          notice: document.getElementById('planNote')?.value || ''
+        })
       });
       DB.maint = data.maintenance;
       applyMaint();
@@ -3842,8 +4213,177 @@ html.off-shift .prof-dot, html.off-shift .sdot { opacity: .2; }
     document.getElementById('admRuns').textContent = (serverAdmin?.attempts || 0) + ' попыток';
   }
 
+  /* ================= notifications ================= */
+  const notifPanel = document.getElementById('notifPanel');
+  const bellDot = document.getElementById('bellDot');
+
+  function renderNotifications() {
+    const seenLocal = JSON.parse(localStorage.getItem('idris_seen') || '[]');
+    const unread = serverNotes.filter(n => !n.seen && !seenLocal.includes(n.id));
+    bellDot.classList.toggle('on', unread.length > 0);
+    document.getElementById('ntBody').innerHTML = serverNotes.length
+      ? serverNotes.map(n => `
+        <div class="nt-item ${n.kind === 'warning' ? 'warning' : ''} ${(!n.seen && !seenLocal.includes(n.id)) ? 'unseen' : ''}">
+          <div class="nt-h">${esc(n.title)}</div>
+          <div>${rich(n.body)}</div>
+          <div class="nt-d">${n.date}</div>
+        </div>`).join('')
+      : '<div class="nt-empty">Уведомлений пока нет</div>';
+  }
+  function toggleNotif(force) {
+    const on = force !== undefined ? force : !notifPanel.classList.contains('open');
+    notifPanel.classList.toggle('open', on);
+    notifPanel.setAttribute('aria-hidden', String(!on));
+    if (on) markNotificationsRead();
+  }
+  async function markNotificationsRead() {
+    localStorage.setItem('idris_seen', JSON.stringify(serverNotes.map(n => n.id)));
+    serverNotes = serverNotes.map(n => ({ ...n, seen: true }));
+    renderNotifications();
+    if (currentUser) await api('/api/notifications/read', { method: 'POST', body: '{}' }).catch(() => {});
+  }
+  document.getElementById('bellBtn').addEventListener('click', () => toggleNotif());
+  document.getElementById('ntClose').addEventListener('click', () => toggleNotif(false));
+  document.getElementById('ntReadAll').addEventListener('click', markNotificationsRead);
+  document.addEventListener('click', e => {
+    if (notifPanel.classList.contains('open') && !notifPanel.contains(e.target) && !e.target.closest('#bellBtn'))
+      toggleNotif(false);
+  });
+
+  /* ================= planned maintenance + cookie ================= */
+  function renderPlanBanner() {
+    const planned = DB.maint?.planned;
+    const banner = document.getElementById('planBanner');
+    const hidden = localStorage.getItem('idris_plan_hidden') === planned;
+    if (planned && !hidden && !DB.maint.on) {
+      document.getElementById('planText').textContent =
+        `Плановые технические работы: ${planned.replace('T', ' ')}${DB.maint.notice ? ' — ' + DB.maint.notice : ''}`;
+      banner.classList.add('on');
+    } else banner.classList.remove('on');
+  }
+  document.getElementById('planHide').addEventListener('click', () => {
+    localStorage.setItem('idris_plan_hidden', DB.maint?.planned || '');
+    document.getElementById('planBanner').classList.remove('on');
+  });
+  if (!localStorage.getItem('idris_cookie_ok')) document.getElementById('cookieBar').classList.add('on');
+  document.getElementById('cookieOk').addEventListener('click', () => {
+    localStorage.setItem('idris_cookie_ok', '1');
+    document.getElementById('cookieBar').classList.remove('on');
+  });
+
+  /* ================= sessions ================= */
+  function renderSessions() {
+    const list = document.getElementById('sessList');
+    if (!list) return;
+    list.innerHTML = serverSessions.length ? serverSessions.map(s => `
+      <div class="sess-row">
+        <span class="sess-ic"><i data-lucide="${s.device.startsWith('Телефон') ? 'smartphone' : 'monitor'}"></i></span>
+        <span class="sess-info"><span class="sess-dev">${esc(s.device)}</span>
+          <span class="sess-meta">вход ${s.started} · активность ${s.active}</span></span>
+        ${s.current ? '<span class="sess-cur">это устройство</span>' : ''}
+        ${s.canRevoke ? `<button class="mg-btn danger" data-sess="${s.id}"><i data-lucide="log-out"></i></button>`
+          : '<span class="sess-meta">старшая</span>'}
+      </div>`).join('') : '<div class="dlg-s" style="margin:0">Активных сессий нет</div>';
+    lucide.createIcons();
+    list.querySelectorAll('[data-sess]').forEach(b => b.addEventListener('click', async () => {
+      try {
+        const res = await api('/api/sessions/revoke', { method: 'POST', body: JSON.stringify({ id: +b.dataset.sess }) });
+        if (res.self) { clearRole(); location.reload(); return; }
+        await syncServer();
+      } catch (error) { alert(error.message); }
+    }));
+  }
+
+  /* ================= accounts (dev) ================= */
+  const ROLE_TITLE = { student: 'Студент', staff: 'Сотрудник IDRIS', dev: 'Разработчик' };
+  function renderUsers() {
+    const list = document.getElementById('usrList');
+    if (!list) return;
+    const q = norm(document.getElementById('usrSearch')?.value || '');
+    const rows = serverUsers.filter(u => !q || norm(u.user).includes(q) || norm(u.group).includes(q) || norm(ROLE_TITLE[u.role]).includes(q));
+    list.innerHTML = rows.length ? rows.map(u => `
+      <div class="usr-row">
+        <span class="st-av">${esc(u.short || '?')}</span>
+        <span class="usr-info"><span class="usr-name2">${esc(u.user)}${u.mustChange ? ' <span class="beta-tag">смена пароля</span>' : ''}</span>
+          <span class="usr-meta">${ROLE_TITLE[u.role]}${u.group ? ' · гр. ' + esc(u.group) : ''} · с ${u.created}</span></span>
+        <select class="usr-role" data-role-for="${u.id}">
+          ${['student','staff','dev'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_TITLE[r]}</option>`).join('')}
+        </select>
+        <button class="mg-btn" data-pwd-for="${u.id}"><i data-lucide="key-round"></i></button>
+        <button class="mg-btn danger" data-del-user="${u.id}"><i data-lucide="user-minus"></i></button>
+      </div>`).join('') : '<div class="dlg-s" style="margin:0">Аккаунты не найдены</div>';
+    lucide.createIcons();
+    list.querySelectorAll('[data-role-for]').forEach(sel => sel.addEventListener('change', async () => {
+      try { await api('/api/admin/users/role', { method: 'POST', body: JSON.stringify({ user_id: +sel.dataset.roleFor, role: sel.value }) }); await syncServer(); }
+      catch (error) { alert(error.message); }
+    }));
+    list.querySelectorAll('[data-pwd-for]').forEach(b => b.addEventListener('click', async () => {
+      try { await api('/api/admin/users/password', { method: 'POST', body: JSON.stringify({ user_id: +b.dataset.pwdFor }) }); await syncServer(); }
+      catch (error) { alert(error.message); }
+    }));
+    list.querySelectorAll('[data-del-user]').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm('Удалить аккаунт вместе с его результатами?')) return;
+      try { await api('/api/admin/users/delete', { method: 'POST', body: JSON.stringify({ user_id: +b.dataset.delUser }) }); await syncServer(); }
+      catch (error) { alert(error.message); }
+    }));
+  }
+  document.getElementById('usrSearch')?.addEventListener('input', renderUsers);
+  document.getElementById('ntSend')?.addEventListener('click', async () => {
+    const title = document.getElementById('ntTitleIn').value.trim();
+    const body = document.getElementById('ntBodyIn').value.trim();
+    if (!title) return;
+    await api('/api/admin/notify', { method: 'POST', body: JSON.stringify({ title, body }) }).catch(() => {});
+    document.getElementById('ntTitleIn').value = '';
+    document.getElementById('ntBodyIn').value = '';
+    await syncServer();
+  });
+
+  /* ================= password change ================= */
+  const pwdDlg = document.getElementById('pwdDlg');
+  document.getElementById('pwdOpen')?.addEventListener('click', () => {
+    document.getElementById('pwdCur').value = '';
+    document.getElementById('pwdNew').value = '';
+    document.getElementById('pwdErr').style.display = 'none';
+    document.getElementById('pwdHint').textContent = currentUser?.mustChange
+      ? 'Администратор попросил обновить пароль. Другие сессии будут завершены.'
+      : 'Введите текущий и новый пароль. Другие сессии будут завершены.';
+    showDlg(pwdDlg);
+  });
+  document.getElementById('pwdGo').addEventListener('click', async () => {
+    const err = document.getElementById('pwdErr');
+    try {
+      await api('/api/auth/password', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_password: document.getElementById('pwdCur').value,
+          new_password: document.getElementById('pwdNew').value
+        })
+      });
+      hideDlgs();
+      await syncServer();
+    } catch (error) { err.textContent = error.message; err.style.display = ''; }
+  });
+
+  /* ================= QR direct access ================= */
+  async function openByCode(code) {
+    try {
+      const data = await api('/api/tests/resolve', { method: 'POST', body: JSON.stringify({ code }) });
+      quizToken = data.token;
+      quizCredential = '';
+      plBlocks = data.blocks;
+      published = published.some(t => t.id === data.test.id) ? published : [data.test, ...published];
+      curTest = published.find(t => t.id === data.test.id) || data.test;
+      renderHome();
+      openTestCard(published.findIndex(t => t.id === data.test.id));
+      history.replaceState({}, '', location.pathname);
+    } catch (error) {
+      flash?.(error.message);
+    }
+  }
+  const qrCode = new URLSearchParams(location.search).get('test');
+
   /* ================= live synchronization ================= */
-  syncServer({ quiet: false });
+  syncServer({ quiet: false }).then(() => { if (qrCode) openByCode(qrCode); });
   if ('EventSource' in window) {
     const live = new EventSource('/api/events');
     ['tests', 'attempts', 'accounts', 'maintenance', 'telegram', 'sync'].forEach(type =>
