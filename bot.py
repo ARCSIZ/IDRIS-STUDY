@@ -88,6 +88,182 @@ def verify_password(password, encoded):
         return False
 
 
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('student','teacher','staff','dev')),
+    group_name TEXT NOT NULL DEFAULT '',
+    employee_id TEXT COLLATE NOCASE,
+    initials TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    accepted_terms INTEGER NOT NULL DEFAULT 0,
+    subject TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS employee_ids (
+    code TEXT PRIMARY KEY COLLATE NOCASE,
+    active INTEGER NOT NULL DEFAULT 1,
+    used_by INTEGER REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    user_agent TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS tests (
+    id TEXT PRIMARY KEY,
+    author_id INTEGER NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    content_json TEXT NOT NULL,
+    points INTEGER NOT NULL DEFAULT 0,
+    question_count INTEGER NOT NULL DEFAULT 0,
+    access_mode TEXT NOT NULL DEFAULT 'open',
+    access_hash TEXT NOT NULL DEFAULT '',
+    qr_code TEXT NOT NULL UNIQUE,
+    published INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quiz_sessions (
+    token_hash TEXT PRIMARY KEY,
+    test_id TEXT NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    test_id TEXT NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    student_name TEXT NOT NULL,
+    group_name TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    grade INTEGER NOT NULL,
+    percent INTEGER NOT NULL,
+    review_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_links (
+    code TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL,
+    chat_id INTEGER,
+    telegram_user_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS telegram_links (
+    account_id TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL UNIQUE,
+    phone TEXT NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    telegram_username TEXT NOT NULL DEFAULT '',
+    linked_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'info',
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_reads (
+    notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY(notification_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attempt_test ON attempts(test_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_session_expiry ON sessions(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id) WHERE employee_id IS NOT NULL;
+"""
+
+
+def table_exists(db, name):
+    return db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name=? AND type='table'", (name,)
+    ).fetchone() is not None
+
+
+def full_fk_rebuild(db):
+    """Восстанавливает схему после старых RENAME-миграций:
+    ссылки FK пересоздаются на корректную таблицу, данные переносятся."""
+    db.execute("PRAGMA foreign_keys=OFF")
+    preserved = {}
+    for table in ("users", "users_old", "tests", "attempts", "employee_ids",
+                  "notifications", "settings", "telegram_links", "pending_links"):
+        preserved[table] = (
+            [dict(r) for r in db.execute(f"SELECT * FROM {table}")]
+            if table_exists(db, table) else []
+        )
+    for table in ("sessions", "quiz_sessions", "notification_reads", "notifications",
+                  "attempts", "tests", "employee_ids", "users_old", "users"):
+        db.execute(f"DROP TABLE IF EXISTS {table}")
+    db.executescript(SCHEMA)
+
+    merged_users = {r["id"]: r for r in preserved["users_old"] + preserved["users"]}
+    used_eid = set()
+    for r in merged_users.values():
+        eid = r.get("employee_id") or None
+        if eid and eid in used_eid:
+            eid = None
+        if eid:
+            used_eid.add(eid)
+        db.execute(
+            "INSERT INTO users(id,name,password_hash,role,group_name,subject,employee_id,"
+            "initials,title,created_at,must_change_password,accepted_terms) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (r["id"], r["name"], r["password_hash"], r.get("role", "student"),
+             r.get("group_name", "") or "", r.get("subject", "") or "", eid,
+             r.get("initials", "") or "", r.get("title", "") or "",
+             r.get("created_at", 0), r.get("must_change_password", 0),
+             r.get("accepted_terms", 0)),
+        )
+    for r in preserved["employee_ids"]:
+        db.execute("INSERT OR IGNORE INTO employee_ids(code,active,used_by) VALUES(?,?,?)",
+                   (r["code"], r.get("active", 1), r.get("used_by")))
+    test_cols = ("id", "author_id", "title", "description", "content_json", "points",
+                 "question_count", "access_mode", "access_hash", "qr_code", "published",
+                 "created_at", "updated_at")
+    for r in preserved["tests"]:
+        db.execute(f"INSERT INTO tests({','.join(test_cols)}) VALUES({','.join(['?'] * len(test_cols))})",
+                   tuple(r.get(c) for c in test_cols))
+    attempt_cols = ("id", "test_id", "user_id", "student_name", "group_name", "score",
+                    "total", "grade", "percent", "review_json", "created_at")
+    for r in preserved["attempts"]:
+        db.execute(f"INSERT INTO attempts({','.join(attempt_cols)}) VALUES({','.join(['?'] * len(attempt_cols))})",
+                   tuple(r.get(c) for c in attempt_cols))
+    for r in preserved["notifications"]:
+        db.execute("INSERT INTO notifications(id,user_id,title,body,kind,created_at) VALUES(?,?,?,?,?,?)",
+                   (r["id"], r.get("user_id"), r["title"], r.get("body", ""),
+                    r.get("kind", "info"), r.get("created_at", 0)))
+    db.execute("PRAGMA foreign_keys=ON")
+    log.warning("Database schema rebuilt: foreign keys repaired, data preserved")
+
+
 def init_db():
     with db_connect() as db:
         db.execute("PRAGMA journal_mode=WAL")
@@ -211,38 +387,16 @@ def init_db():
             if column not in columns:
                 db.execute(ddl)
 
-        # Миграция: роль «teacher» и снятие UNIQUE с employee_id (пустые значения ломали регистрацию).
-        schema = db.execute("SELECT sql FROM sqlite_master WHERE name='users'").fetchone()
-        if schema and ("'teacher'" not in schema["sql"] or "employee_id TEXT UNIQUE" in schema["sql"]):
-            db.execute("ALTER TABLE users RENAME TO users_old")
-            db.execute(
-                """
-                CREATE TABLE users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                    password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK(role IN ('student','teacher','staff','dev')),
-                    group_name TEXT NOT NULL DEFAULT '',
-                    employee_id TEXT COLLATE NOCASE,
-                    initials TEXT NOT NULL DEFAULT '',
-                    title TEXT NOT NULL DEFAULT '',
-                    created_at INTEGER NOT NULL,
-                    must_change_password INTEGER NOT NULL DEFAULT 0,
-                    accepted_terms INTEGER NOT NULL DEFAULT 0,
-                    subject TEXT NOT NULL DEFAULT ''
-                )
-                """
-            )
-            old_columns = {row["name"] for row in db.execute("PRAGMA table_info(users_old)")}
-            shared = [c for c in (
-                "id", "name", "password_hash", "role", "group_name", "employee_id",
-                "initials", "title", "created_at", "must_change_password", "accepted_terms", "subject",
-            ) if c in old_columns]
-            db.execute(f"INSERT INTO users({','.join(shared)}) SELECT {','.join(shared)} FROM users_old")
-            db.execute("UPDATE users SET employee_id=NULL WHERE employee_id=''")
-            db.execute("DROP TABLE users_old")
-            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id) WHERE employee_id IS NOT NULL")
-        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id) WHERE employee_id IS NOT NULL")
+        # Проверяем, не сломаны ли ссылки FK старой RENAME-миграцией.
+        users_schema = db.execute("SELECT sql FROM sqlite_master WHERE name='users'").fetchone()
+        users_sql = users_schema["sql"] if users_schema and users_schema["sql"] else ""
+        broken_refs = False
+        for dep in ("sessions", "employee_ids", "tests", "attempts", "notifications", "notification_reads"):
+            s = db.execute("SELECT sql FROM sqlite_master WHERE name=?", (dep,)).fetchone()
+            if s and s["sql"] and "users_old" in s["sql"]:
+                broken_refs = True
+        if broken_refs or table_exists(db, "users_old") or "'teacher'" not in users_sql or "employee_id TEXT UNIQUE" in users_sql:
+            full_fk_rebuild(db)
 
         dev_name = os.getenv("DEV_NAME", "Самир Гамидов").strip()
         dev_password = os.getenv("DEV_PASSWORD", "Fakiza2015")
